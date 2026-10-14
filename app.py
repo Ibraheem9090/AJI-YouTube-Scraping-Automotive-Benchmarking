@@ -1,6 +1,10 @@
 import os
 import json
 import streamlit as st
+
+# Automatically install Chromium browser binaries if running in Streamlit Cloud / headless Linux
+os.system("playwright install chromium")
+
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
 
@@ -22,7 +26,7 @@ WORKFLOW_FILE = "youtube_workflow.json"
 tab_run, tab_studio = st.tabs(["🚀 Run Benchmarking Pipeline", "🛠️ LfD Workflow Studio (Recorder & JSON Manager)"])
 
 # ==========================================
-# TAB 1: RUN PIPELINE
+# TAB 1: RUN BENCHMARKING PIPELINE
 # ==========================================
 with tab_run:
     st.header("Automated Benchmarking Execution")
@@ -79,6 +83,12 @@ with tab_run:
                             page.goto(v_url, timeout=30000)
                             page.wait_for_load_timeout(2500)
 
+                            # Open description expander if available
+                            try:
+                                page.click("tp-yt-paper-button#expand", timeout=2000)
+                            except Exception:
+                                pass
+
                             # Execute LfD Steps from JSON
                             transcript_opened = False
                             for step in workflow.get('steps', []):
@@ -90,6 +100,17 @@ with tab_run:
                                             break
                                         except Exception:
                                             continue
+
+                            if not transcript_opened:
+                                page.mouse.wheel(0, 350)
+                                page.wait_for_timeout(1500)
+                                for selector in ["button[aria-label*='transcript' i]", "text=Show transcript"]:
+                                    try:
+                                        page.click(selector, timeout=3000)
+                                        transcript_opened = True
+                                        break
+                                    except Exception:
+                                        continue
 
                             if transcript_opened:
                                 page.wait_for_selector("ytd-transcript-segment-renderer", timeout=6000)
@@ -112,6 +133,9 @@ with tab_run:
                                             'ocr_text': window_text.replace('\n', ' ')
                                         })
                                         break
+                            else:
+                                st.warning("Could not automatically locate the transcript panel for this video.")
+
                     except Exception as e:
                         st.error(f"Execution error: {str(e)}")
                     finally:
@@ -120,21 +144,26 @@ with tab_run:
                 if all_matches:
                     st.success(f"✅ Found {len(all_matches)} matching segment(s)!")
                     all_results = []
-                    for match in all_matches:
-                        # Call Nemotron VLM
-                        base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
-                        api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
-                        client = OpenAI(base_url=base_url, api_key=api_key)
-                        
-                        response = client.chat.completions.create(
-                            model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-                            messages=[{"role": "user", "content": f"Instructions: {user_prompt}\n\nContext: {match['ocr_text']}"}],
-                            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
-                            max_tokens=1024
-                        )
-                        all_results.append({**match, 'analysis': response.choices[0].message.content})
+                    
+                    base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
+                    api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
+                    client = OpenAI(base_url=base_url, api_key=api_key)
 
-                    # Generate PDF
+                    for match in all_matches:
+                        try:
+                            response = client.chat.completions.create(
+                                model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                                messages=[{"role": "user", "content": f"Instructions: {user_prompt}\n\nContext: {match['ocr_text']}"}],
+                                extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+                                max_tokens=1024
+                            )
+                            analysis_text = response.choices[0].message.content
+                        except Exception as e:
+                            analysis_text = f"Nemotron VLM Analysis Error: {str(e)}"
+
+                        all_results.append({**match, 'analysis': analysis_text})
+
+                    # Generate PDF Report
                     doc = SimpleDocTemplate("Transcript_Analysis_Report.pdf", pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
                     styles = getSampleStyleSheet()
                     story = [
@@ -169,7 +198,7 @@ with tab_studio:
         "steps": [
             {"step": 1, "action": "navigate_channel", "target_url_template": "https://www.youtube.com/{channel}/videos"},
             {"step": 2, "action": "click_first_video", "selector": "ytd-rich-item-renderer #video-title"},
-            {"step": 3, "action": "open_transcript_panel", "selectors": ["button[aria-label*='Show transcript' i]", "button[aria-label*='transcript' i]"]},
+            {"step": 3, "action": "open_transcript_panel", "selectors": ["button[aria-label*='Show transcript' i]", "button[aria-label*='transcript' i]", "text=Show transcript"]},
             {"step": 4, "action": "extract_segments", "container": "ytd-transcript-segment-renderer"}
         ]
     }
@@ -190,11 +219,10 @@ with tab_studio:
     with col_save:
         if st.button("💾 Save Workflow to JSON"):
             try:
-                # Validate JSON syntax
                 parsed_json = json.loads(edited_json_str)
                 with open(WORKFLOW_FILE, "w") as f:
                     json.dump(parsed_json, f, indent=4)
-                st.success(f"Successfully saved and committed to `{WORKFLOW_FILE}`! You can now push this to Git.")
+                st.success(f"Successfully saved to `{WORKFLOW_FILE}`! You can now commit and push to Git.")
             except json.JSONDecodeError as e:
                 st.error(f"Invalid JSON format: {str(e)}")
 
@@ -202,7 +230,7 @@ with tab_studio:
         if st.button("🧪 Test Workflow Selectors Live"):
             st.info("Testing selectors against a sample video from @CCR-Galib...")
             try:
-                with sync_app_test := sync_playwright() as p:
+                with sync_playwright() as p:
                     browser = p.chromium.launch(headless=True)
                     page = browser.new_page()
                     page.goto("https://www.youtube.com/@CCR-Galib/videos")
