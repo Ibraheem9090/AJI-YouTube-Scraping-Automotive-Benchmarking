@@ -100,26 +100,30 @@ def get_videos_from_source(url, limit=1):
     return videos
 
 def phase1_transcript_check(video_id, keyword):
-    """Phase 1: Bulletproof transcript fetching with tokenized window matching."""
+    """Phase 1: Robust transcript fetching using list_transcripts with safe fallback handling."""
     transcript = None
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
+        # Try to find English or Chinese transcript tracks
         target_track = None
         for t in transcript_list:
             if any(lang in t.language_code.lower() for lang in ['en', 'zh']):
                 target_track = t
                 break
+        
+        # If specific language not found, take the first available track
         if not target_track:
-            target_track = next(iter(transcript_list))
+            for t in transcript_list:
+                target_track = t
+                break
+                
+        if target_track:
+            transcript = target_track.fetch()
             
-        transcript = target_track.fetch()
     except Exception as e:
-        try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        except Exception as e2:
-            st.warning(f"Could not retrieve transcript for video ID {video_id}: {str(e2)}")
-            return None
+        st.warning(f"Could not retrieve transcript list for video ID {video_id}: {str(e)}")
+        return None
 
     if not transcript:
         return None
