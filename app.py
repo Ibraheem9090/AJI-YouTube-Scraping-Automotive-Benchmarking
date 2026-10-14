@@ -35,7 +35,7 @@ channel_or_video_url = channel_options[selected_channel_name]
 
 search_keyword = st.sidebar.text_input(
     "Target Keyword / Item (e.g., screen, battery, dashboard)", 
-    value="wireless charger"
+    value="wireless chargers"
 )
 
 max_videos = st.sidebar.slider("Max Videos to Process", min_value=1, max_value=5, value=1)
@@ -100,36 +100,40 @@ def get_videos_from_source(url, limit=1):
     return videos
 
 def phase1_transcript_check(video_id, keyword):
-    """Phase 1: Robust multi-method transcript fetching with sliding window phrase matching."""
-    matches = []
+    """Phase 1: Bulletproof transcript fetching with tokenized window matching."""
     transcript = None
-    
-    # Try multiple fetching approaches to handle version differences in youtube-transcript-api
-    methods = [
-        lambda: YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'zh', 'zh-Hans', 'zh-Hant']),
-        lambda: YouTubeTranscriptApi.list_transcripts(video_id).find_transcript(['en', 'zh', 'zh-Hans', 'zh-Hant']).fetch(),
-        lambda: YouTubeTranscriptApi.list_transcripts(video_id).__iter__().__next__().fetch(),
-        lambda: YouTubeTranscriptApi().list(video_id).__iter__().__next__().fetch()
-    ]
-    
-    for method in methods:
-        try:
-            transcript = method()
-            if transcript:
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        target_track = None
+        for t in transcript_list:
+            if any(lang in t.language_code.lower() for lang in ['en', 'zh']):
+                target_track = t
                 break
-        except Exception:
-            continue
+        if not target_track:
+            target_track = next(iter(transcript_list))
             
+        transcript = target_track.fetch()
+    except Exception as e:
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        except Exception as e2:
+            st.warning(f"Could not retrieve transcript for video ID {video_id}: {str(e2)}")
+            return None
+
     if not transcript:
         return None
 
+    matches = []
     try:
-        keyword_lower = keyword.lower()
-        # Sliding window across 3 consecutive transcript segments to catch split multi-word phrases
+        keyword_tokens = [token.lower() for token in keyword.split()]
+        
+        # Sliding window across consecutive subtitle fragments to catch multi-word and pluralized phrases
         for i in range(len(transcript)):
             window_text = " ".join([transcript[j]['text'] for j in range(i, min(i + 3, len(transcript)))])
+            window_lower = window_text.lower()
             
-            if keyword_lower in window_text.lower():
+            if keyword_tokens and all(token in window_lower for token in keyword_tokens):
                 matches.append({
                     'start_time': transcript[i]['start'],
                     'text': window_text.replace('\n', ' ')
