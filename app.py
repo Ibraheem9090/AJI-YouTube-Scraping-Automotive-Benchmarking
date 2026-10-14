@@ -3,15 +3,15 @@ import json
 import subprocess
 import streamlit as st
 
-# Function to ensure Playwright Chromium binaries are installed safely once
+# Safe, cached installation of Playwright Chromium binary in Streamlit Cloud
 @st.cache_resource
-def install_playwright_browsers():
+def ensure_playwright_installed():
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True)
     except Exception as e:
-        st.warning(f"Browser installation notice: {e}")
+        st.warning(f"Browser binary setup note: {e}")
 
-install_playwright_browsers()
+ensure_playwright_installed()
 
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
@@ -64,24 +64,28 @@ with tab_run:
                     workflow = json.load(f)
 
                 all_matches = []
+                
+                # Cloud-optimized Chromium launch flags
                 with sync_playwright() as p:
-                    # Added headless launch args required for cloud environments
-                    browser = p.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--no-sandbox",
-                            "--disable-setuid-sandbox",
-                            "--disable-dev-shm-usage",
-                            "--disable-gpu",
-                            "--no-first-run",
-                            "--no-zygote",
-                            "--single-process"
-                        ]
-                    )
-                    context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    page = context.new_page()
-
                     try:
+                        browser = p.chromium.launch(
+                            headless=True,
+                            args=[
+                                "--no-sandbox",
+                                "--disable-setuid-sandbox",
+                                "--disable-dev-shm-usage",
+                                "--disable-accelerated-2d-canvas",
+                                "--no-first-run",
+                                "--no-zygote",
+                                "--single-process",
+                                "--disable-gpu"
+                            ]
+                        )
+                        context = browser.new_context(
+                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        )
+                        page = context.new_page()
+
                         # Step 1: Navigate to channel
                         channel_url = f"https://www.youtube.com/{channel_handle}/videos"
                         page.goto(channel_url, timeout=30000)
@@ -160,7 +164,10 @@ with tab_run:
                     except Exception as e:
                         st.error(f"Automation execution error: {str(e)}")
                     finally:
-                        browser.close()
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
 
                 if all_matches:
                     st.success(f"✅ Successfully extracted {len(all_matches)} matching segment(s) via LfD workflow!")
