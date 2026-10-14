@@ -1,285 +1,213 @@
 import os
-import urllib.parse
-import base64
+import json
 import streamlit as st
-import yt_dlp
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from playwright.sync_api import sync_playwright
 from openai import OpenAI
 
 # ReportLab imports for PDF Generation
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # Streamlit Page Config
-st.set_page_config(page_title="AI YouTube Car Part Analyzer (Transcript-Only)", layout="wide")
+st.set_page_config(page_title="AI YouTube Car Part Analyzer (LfD Studio)", layout="wide")
 
-st.title("🚗 AI Automotive Video & Part Analyzer (Transcript-Only Pipeline) — By Ibraheem")
-st.markdown("Automated multi-modal pipeline for Chinese car review channels (`@rsloncars`, `@CCR-Galib`), utilizing direct transcript timestamp extraction, processed via **Nvidia Nemotron-3 Nano Omni Reasoning VLM**, and compiled into a structured PDF report.")
+st.title("🚗 AI Automotive Video & Part Analyzer (LfD Studio) — By Ibraheem")
+st.markdown("Interactive Learning-from-Demonstration (LfD) pipeline. Record, test, and save JSON workflows in Git, process transcripts via **Nvidia Nemotron VLM**, and compile structured PDF reports.")
 
-# --- SIDEBAR CONFIGURATION ---
-st.sidebar.header("Pipeline Configuration")
+WORKFLOW_FILE = "youtube_workflow.json"
 
-channel_options = {
-    "@rsloncars": "https://www.youtube.com/@rsloncars",
-    "@CCR-Galib": "https://www.youtube.com/@CCR-Galib"
-}
+# --- NAVIGATION TABS ---
+tab_run, tab_studio = st.tabs(["🚀 Run Benchmarking Pipeline", "🛠️ LfD Workflow Studio (Recorder & JSON Manager)"])
 
-selected_channel_name = st.sidebar.selectbox(
-    "Select YouTube Channel",
-    options=list(channel_options.keys())
-)
-
-channel_or_video_url = channel_options[selected_channel_name]
-
-search_keyword = st.sidebar.text_input(
-    "Target Keyword / Item (e.g., screen, battery, dashboard)", 
-    value="wireless chargers"
-)
-
-max_videos = st.sidebar.slider("Max Videos to Process", min_value=1, max_value=5, value=1)
-
-st.sidebar.markdown("---")
-
-user_prompt = st.sidebar.text_area(
-    "Custom AI Prompt Instructions:",
-    value="Analyze the component's specifications, features, and context mentioned in this transcript segment.",
-    help="Custom prompt passed to the VLM reasoning module along with transcript text."
-)
-
-run_button = st.sidebar.button("🚀 Run Analysis & Generate PDF")
-
-# --- HELPER FUNCTIONS ---
-
-def extract_video_id(url):
-    """Extracts YouTube video ID from various URL formats."""
-    parsed_url = urllib.parse.urlparse(url)
-    if parsed_url.netloc == 'youtu.be':
-        return parsed_url.path[1:]
-    if parsed_url.netloc in ('www.youtube.com', 'youtube.com'):
-        if parsed_url.path == '/watch':
-            return urllib.parse.parse_qs(parsed_url.query).get('v', [None])[0]
-        elif parsed_url.path.startswith(('/embed/', '/v/')):
-            return parsed_url.path.split('/')[2]
-    return None
-
-def get_videos_from_source(url, limit=1):
-    """Fetches video entries using yt-dlp metadata extraction without downloading media."""
-    if "@" in url and not url.endswith(("/videos", "/shorts", "/streams")):
-        url = url.rstrip("/") + "/videos"
-        
-    ydl_opts = {
-        'extract_flat': 'in_playlist',
-        'skip_download': True,
-        'playlistend': limit
-    }
-    videos = []
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if 'entries' in info:
-                for entry in info['entries']:
-                    vid_id = entry.get('id')
-                    if vid_id and not vid_id.startswith('UC'):
-                        videos.append({
-                            'id': vid_id,
-                            'title': entry.get('title', 'Unknown Title'),
-                            'url': f"https://www.youtube.com/watch?v={vid_id}"
-                        })
-            else:
-                vid_id = info.get('id')
-                if vid_id and not vid_id.startswith('UC'):
-                    videos.append({
-                        'id': vid_id,
-                        'title': info.get('title', 'Unknown Title'),
-                        'url': url
-                    })
-    except Exception as e:
-        st.error(f"Error fetching channel metadata: {str(e)}")
-    return videos
-
-def phase1_transcript_check(video_id, keyword):
-    """Phase 1: Robust transcript fetching using list_transcripts with safe fallback handling."""
-    transcript = None
-    try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # Try to find English or Chinese transcript tracks
-        target_track = None
-        for t in transcript_list:
-            if any(lang in t.language_code.lower() for lang in ['en', 'zh']):
-                target_track = t
-                break
-        
-        # If specific language not found, take the first available track
-        if not target_track:
-            for t in transcript_list:
-                target_track = t
-                break
-                
-        if target_track:
-            transcript = target_track.fetch()
-            
-    except Exception as e:
-        st.warning(f"Could not retrieve transcript list for video ID {video_id}: {str(e)}")
-        return None
-
-    if not transcript:
-        return None
-
-    matches = []
-    try:
-        keyword_tokens = [token.lower() for token in keyword.split()]
-        
-        # Sliding window across consecutive subtitle fragments to catch multi-word and pluralized phrases
-        for i in range(len(transcript)):
-            window_text = " ".join([transcript[j]['text'] for j in range(i, min(i + 3, len(transcript)))])
-            window_lower = window_text.lower()
-            
-            if keyword_tokens and all(token in window_lower for token in keyword_tokens):
-                matches.append({
-                    'start_time': transcript[i]['start'],
-                    'text': window_text.replace('\n', ' ')
-                })
-    except Exception as e:
-        st.warning(f"Transcript parsing warning for video {video_id}: {str(e)}")
-        return None
-        
-    return matches if matches else None
-
-def analyze_with_nemotron_vlm(user_prompt, context_text):
-    """Sends transcript context to nvidia/nemotron-3-nano-omni-30b-a3b-reasoning with thinking mode enabled."""
-    try:
-        base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
-        api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
-        
-        client = OpenAI(base_url=base_url, api_key=api_key)
-        
-        messages_content = [
-            {
-                "type": "text", 
-                "text": f"Instructions: {user_prompt}\n\nTranscript Segment / Context: {context_text}"
-            }
-        ]
-
-        response = client.chat.completions.create(
-            model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-            messages=[
-                {
-                    "role": "user",
-                    "content": messages_content
-                }
-            ],
-            extra_body={
-                "chat_template_kwargs": {
-                    "enable_thinking": True
-                }
-            },
-            max_tokens=1024
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"Nemotron VLM Analysis Error: {str(e)}"
-
-def generate_pdf_report(results_data, filename="Transcript_Analysis_Report.pdf"):
-    """Compiles final structured PDF table report using ReportLab."""
-    doc = SimpleDocTemplate(filename, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-    styles = getSampleStyleSheet()
-    story = []
-
-    title_style = ParagraphStyle(
-        'TitleStyle',
-        parent=styles['Heading1'],
-        fontSize=18,
-        textColor=colors.HexColor("#1A365D"),
-        spaceAfter=12
-    )
+# ==========================================
+# TAB 1: RUN PIPELINE
+# ==========================================
+with tab_run:
+    st.header("Automated Benchmarking Execution")
     
-    story.append(Paragraph("🚗 Automotive Video Transcript Analysis Report — By Ibraheem", title_style))
-    story.append(Paragraph("Generated via Transcript-Only Nemotron VLM Pipeline", styles['Normal']))
-    story.append(Spacer(1, 15))
-
-    table_data = [[
-        Paragraph("<b>Video / Channel</b>", styles['Normal']),
-        Paragraph("<b>Timestamp</b>", styles['Normal']),
-        Paragraph("<b>Transcript Text</b>", styles['Normal']),
-        Paragraph("<b>Nemotron Reasoning & Analysis</b>", styles['Normal'])
-    ]]
-
-    for item in results_data:
-        meta_text = f"<b>Title:</b> {item['title']}"
-        detail_text = f"<b>AI Analysis:</b> {item['analysis']}"
-
-        table_data.append([
-            Paragraph(meta_text, styles['Normal']),
-            Paragraph(str(item['timestamp']), styles['Normal']),
-            Paragraph(item['ocr_text'], styles['Normal']),
-            Paragraph(detail_text, styles['Normal'])
-        ])
-
-    col_widths = [130, 70, 140, 200]
-    t = Table(table_data, colWidths=col_widths)
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#E2E8F0")),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-    ]))
-
-    story.append(t)
-    doc.build(story)
-    return filename
-
-# --- MAIN APP EXECUTION ---
-if run_button:
-    with st.spinner("Fetching transcripts and querying Nemotron-3 Nano Omni VLM..."):
-        videos = get_videos_from_source(channel_or_video_url, limit=max_videos)
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        channel_options = {"@rsloncars": "@rsloncars", "@CCR-Galib": "@CCR-Galib"}
+        selected_channel_name = st.selectbox("Select YouTube Channel", options=list(channel_options.keys()))
+        channel_handle = channel_options[selected_channel_name]
         
-        if not videos:
-            st.warning("No valid videos found from the selected URL.")
-        else:
-            all_results = []
-            
-            for vid in videos:
-                st.write(f"Processing video: **{vid['title']}**")
-                video_id = extract_video_id(vid['url'])
-                
-                transcript_matches = phase1_transcript_check(video_id, search_keyword) if video_id else None
-                
-                if transcript_matches:
-                    st.success(f"✅ Transcript found! Located {len(transcript_matches)} keyword match(es).")
-                    for match in transcript_matches[:3]:
-                        mins = int(match['start_time'] // 60)
-                        secs = int(match['start_time'] % 60)
-                        timestamp_str = f"{mins:02d}:{secs:02d}"
-                        
-                        ai_analysis = analyze_with_nemotron_vlm(
-                            user_prompt=user_prompt, 
-                            context_text=match['text']
-                        )
-                        
-                        all_results.append({
-                            'title': vid['title'],
-                            'timestamp': timestamp_str,
-                            'ocr_text': match['text'],
-                            'analysis': ai_analysis
-                        })
-                else:
-                    st.warning(f"ℹ️ Transcript missing or keyword '{search_keyword}' not found for video: {vid['title']}.")
+        search_keyword = st.text_input("Target Keyword / Item", value="wireless chargers")
 
-            if all_results:
-                pdf_filename = generate_pdf_report(all_results)
-                st.success("🎉 Analysis complete and structured PDF report successfully generated!")
-                
-                with open(pdf_filename, "rb") as pdf_file:
-                    st.download_button(
-                        label="📥 Download Structured PDF Report",
-                        data=pdf_file,
-                        file_name="Transcript_Car_Analysis_Report.pdf",
-                        mime="application/pdf"
-                    )
-            else:
-                st.warning("No matching transcript segments could be extracted across the selected videos.")
+    with col2:
+        max_videos = st.slider("Max Videos to Process", min_value=1, max_value=5, value=1)
+        user_prompt = st.text_area(
+            "Custom AI Prompt Instructions:",
+            value="Analyze the component's specifications, features, and context mentioned in this transcript segment."
+        )
+
+    run_button = st.button("🚀 Run LfD Pipeline & Generate PDF Report")
+
+    if run_button:
+        if not os.path.exists(WORKFLOW_FILE):
+            st.error(f"Workflow file '{WORKFLOW_FILE}' not found! Please define it in the LfD Workflow Studio tab.")
+        else:
+            with st.spinner("Executing LfD JSON workflow and querying Nemotron VLM..."):
+                with open(WORKFLOW_FILE, "r") as f:
+                    workflow = json.load(f)
+
+                all_matches = []
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    page = context.new_page()
+
+                    try:
+                        channel_url = f"https://www.youtube.com/{channel_handle}/videos"
+                        page.goto(channel_url, timeout=30000)
+                        page.wait_for_selector("ytd-rich-item-renderer", timeout=10000)
+
+                        video_elements = page.locator("ytd-rich-item-renderer #video-title").all()
+                        video_urls = []
+                        for el in video_elements[:max_videos]:
+                            href = el.get_attribute("href")
+                            if href:
+                                if href.startswith("/"):
+                                    href = f"https://www.youtube.com{href}"
+                                video_urls.append(href)
+
+                        keyword_tokens = [t.lower() for t in search_keyword.split()]
+
+                        for v_url in video_urls:
+                            st.write(f"🌐 Processing video: {v_url}")
+                            page.goto(v_url, timeout=30000)
+                            page.wait_for_load_timeout(2500)
+
+                            # Execute LfD Steps from JSON
+                            transcript_opened = False
+                            for step in workflow.get('steps', []):
+                                if step.get('action') == 'open_transcript_panel':
+                                    for selector in step.get('selectors', []):
+                                        try:
+                                            page.click(selector, timeout=3000)
+                                            transcript_opened = True
+                                            break
+                                        except Exception:
+                                            continue
+
+                            if transcript_opened:
+                                page.wait_for_selector("ytd-transcript-segment-renderer", timeout=6000)
+                                segments = page.locator("ytd-transcript-segment-renderer").all()
+
+                                seg_texts, seg_times = [], []
+                                for seg in segments:
+                                    try:
+                                        seg_times.append(seg.locator(".segment-timestamp").inner_text())
+                                        seg_texts.append(seg.locator(".segment-text").inner_text())
+                                    except Exception:
+                                        continue
+
+                                for i in range(len(seg_texts)):
+                                    window_text = " ".join(seg_texts[i:min(i + 3, len(seg_texts))])
+                                    if keyword_tokens and all(tok in window_text.lower() for tok in keyword_tokens):
+                                        all_matches.append({
+                                            'title': page.title(),
+                                            'timestamp': seg_times[i],
+                                            'ocr_text': window_text.replace('\n', ' ')
+                                        })
+                                        break
+                    except Exception as e:
+                        st.error(f"Execution error: {str(e)}")
+                    finally:
+                        browser.close()
+
+                if all_matches:
+                    st.success(f"✅ Found {len(all_matches)} matching segment(s)!")
+                    all_results = []
+                    for match in all_matches:
+                        # Call Nemotron VLM
+                        base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
+                        api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
+                        client = OpenAI(base_url=base_url, api_key=api_key)
+                        
+                        response = client.chat.completions.create(
+                            model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                            messages=[{"role": "user", "content": f"Instructions: {user_prompt}\n\nContext: {match['ocr_text']}"}],
+                            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+                            max_tokens=1024
+                        )
+                        all_results.append({**match, 'analysis': response.choices[0].message.content})
+
+                    # Generate PDF
+                    doc = SimpleDocTemplate("Transcript_Analysis_Report.pdf", pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+                    styles = getSampleStyleSheet()
+                    story = [
+                        Paragraph("🚗 Automotive Video Transcript Analysis Report — By Ibraheem", styles['Heading1']),
+                        Spacer(1, 15)
+                    ]
+                    table_data = [[Paragraph("<b>Video</b>", styles['Normal']), Paragraph("<b>Time</b>", styles['Normal']), Paragraph("<b>Text</b>", styles['Normal']), Paragraph("<b>Analysis</b>", styles['Normal'])]]
+                    for item in all_results:
+                        table_data.append([Paragraph(item['title'], styles['Normal']), Paragraph(item['timestamp'], styles['Normal']), Paragraph(item['ocr_text'], styles['Normal']), Paragraph(item['analysis'], styles['Normal'])])
+                    
+                    t = Table(table_data, colWidths=[130, 70, 140, 200])
+                    t.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")), ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#E2E8F0"))]))
+                    story.append(t)
+                    doc.build(story)
+
+                    with open("Transcript_Analysis_Report.pdf", "rb") as f:
+                        st.download_button("📥 Download Structured PDF Report", f, file_name="LfD_Report.pdf", mime="application/pdf")
+                else:
+                    st.warning("No matching segments found.")
+
+# ==========================================
+# TAB 2: LfD WORKFLOW STUDIO (RECORDER)
+# ==========================================
+with tab_studio:
+    st.header("🛠️ LfD Workflow Studio")
+    st.markdown("Inspect, customize, and save your declarative JSON workflow. When you update selectors here, they are instantly saved to `youtube_workflow.json` for Git tracking.")
+
+    # Load existing workflow or provide default template
+    default_workflow = {
+        "workflow_name": "youtube_channel_transcript_extractor",
+        "target_channels": ["@rsloncars", "@CCR-Galib"],
+        "steps": [
+            {"step": 1, "action": "navigate_channel", "target_url_template": "https://www.youtube.com/{channel}/videos"},
+            {"step": 2, "action": "click_first_video", "selector": "ytd-rich-item-renderer #video-title"},
+            {"step": 3, "action": "open_transcript_panel", "selectors": ["button[aria-label*='Show transcript' i]", "button[aria-label*='transcript' i]"]},
+            {"step": 4, "action": "extract_segments", "container": "ytd-transcript-segment-renderer"}
+        ]
+    }
+
+    if os.path.exists(WORKFLOW_FILE):
+        with open(WORKFLOW_FILE, "r") as f:
+            try:
+                current_json_str = f.read()
+            except Exception:
+                current_json_str = json.dumps(default_workflow, indent=4)
+    else:
+        current_json_str = json.dumps(default_workflow, indent=4)
+
+    # Editable JSON Text Area in Streamlit
+    edited_json_str = st.text_area("Edit Workflow JSON Schema", value=current_json_str, height=350)
+
+    col_save, col_test = st.columns(2)
+    with col_save:
+        if st.button("💾 Save Workflow to JSON"):
+            try:
+                # Validate JSON syntax
+                parsed_json = json.loads(edited_json_str)
+                with open(WORKFLOW_FILE, "w") as f:
+                    json.dump(parsed_json, f, indent=4)
+                st.success(f"Successfully saved and committed to `{WORKFLOW_FILE}`! You can now push this to Git.")
+            except json.JSONDecodeError as e:
+                st.error(f"Invalid JSON format: {str(e)}")
+
+    with col_test:
+        if st.button("🧪 Test Workflow Selectors Live"):
+            st.info("Testing selectors against a sample video from @CCR-Galib...")
+            try:
+                with sync_app_test := sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    page = browser.new_page()
+                    page.goto("https://www.youtube.com/@CCR-Galib/videos")
+                    page.wait_for_selector("ytd-rich-item-renderer", timeout=8000)
+                    st.success("✅ Successfully connected to channel DOM and validated base selectors!")
+                    browser.close()
+            except Exception as e:
+                st.error(f"Test failed: {str(e)}")
