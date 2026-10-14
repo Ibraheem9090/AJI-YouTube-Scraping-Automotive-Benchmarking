@@ -65,7 +65,6 @@ with tab_run:
 
                 all_matches = []
                 
-                # Cloud-optimized Chromium launch flags
                 with sync_playwright() as p:
                     try:
                         browser = p.chromium.launch(
@@ -107,25 +106,33 @@ with tab_run:
                             st.write(f"🌐 Navigating to video: {v_url}")
                             page.goto(v_url, timeout=30000)
                             page.wait_for_load_state("domcontentloaded")
+                            page.wait_for_timeout(2000) # Allow initial hydration
 
-                            # Step 3: Expand description (...more) as demonstrated in codegen
+                            # Step 3: Expand description (...more) matching codegen
                             try:
-                                page.click("button#expand, tp-yt-paper-button#expand", timeout=3000)
+                                page.get_by_role("button", name="...more").click(timeout=3000)
+                                page.wait_for_timeout(1000)
                             except Exception:
-                                pass
-
-                            # Step 4: Open transcript panel
-                            transcript_opened = False
-                            for sel in ["button[aria-label*='Show transcript' i]", "button:has-text('Show transcript')"]:
                                 try:
-                                    page.click(sel, timeout=3000)
-                                    transcript_opened = True
-                                    break
+                                    page.click("button#expand, tp-yt-paper-button#expand", timeout=2000)
                                 except Exception:
-                                    continue
+                                    pass
+
+                            # Step 4: Open transcript panel matching codegen
+                            transcript_opened = False
+                            try:
+                                page.get_by_role("button", name="Show transcript").click(timeout=4000)
+                                transcript_opened = True
+                            except Exception:
+                                for sel in ["button[aria-label*='Show transcript' i]", "button:has-text('Show transcript')", "text=Show transcript"]:
+                                    try:
+                                        page.click(sel, timeout=3000)
+                                        transcript_opened = True
+                                        break
+                                    except Exception:
+                                        continue
 
                             if not transcript_opened:
-                                # Fallback scroll
                                 page.mouse.wheel(0, 400)
                                 page.wait_for_timeout(1500)
                                 for sel in ["button[aria-label*='Show transcript' i]", "button:has-text('Show transcript')"]:
@@ -136,10 +143,15 @@ with tab_run:
                                     except Exception:
                                         continue
 
-                            # Step 5: Extract transcript segments and match keyword
+                            # Step 5: Extract transcript segments and match keyword with robust wait
                             if transcript_opened:
-                                page.wait_for_selector("ytd-transcript-segment-renderer", timeout=8000)
+                                try:
+                                    page.wait_for_selector("ytd-transcript-segment-renderer", timeout=10000)
+                                except Exception:
+                                    page.wait_for_timeout(3000)
+
                                 segments = page.locator("ytd-transcript-segment-renderer").all()
+                                st.write(f"🔍 Extracted {len(segments)} transcript segments from DOM.")
 
                                 seg_texts, seg_times = [], []
                                 for seg in segments:
@@ -151,7 +163,8 @@ with tab_run:
 
                                 for i in range(len(seg_texts)):
                                     window_text = " ".join(seg_texts[i:min(i + 3, len(seg_texts))])
-                                    if keyword_tokens and all(tok in window_text.lower() for tok in keyword_tokens):
+                                    window_lower = window_text.lower()
+                                    if keyword_tokens and all(tok in window_lower for tok in keyword_tokens):
                                         all_matches.append({
                                             'title': page.title(),
                                             'timestamp': seg_times[i],
