@@ -1,9 +1,17 @@
 import os
 import json
+import subprocess
 import streamlit as st
 
-# Automatically install Chromium if missing in cloud container
-os.system("playwright install chromium")
+# Function to ensure Playwright Chromium binaries are installed safely once
+@st.cache_resource
+def install_playwright_browsers():
+    try:
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        st.warning(f"Browser installation notice: {e}")
+
+install_playwright_browsers()
 
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
@@ -57,7 +65,19 @@ with tab_run:
 
                 all_matches = []
                 with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=True)
+                    # Added headless launch args required for cloud environments
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-setuid-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                            "--no-first-run",
+                            "--no-zygote",
+                            "--single-process"
+                        ]
+                    )
                     context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                     page = context.new_page()
 
@@ -82,7 +102,7 @@ with tab_run:
                         for v_url in video_urls:
                             st.write(f"🌐 Navigating to video: {v_url}")
                             page.goto(v_url, timeout=30000)
-                            page.wait_for_load_timeout(2500)
+                            page.wait_for_load_state("domcontentloaded")
 
                             # Step 3: Expand description (...more) as demonstrated in codegen
                             try:
