@@ -38,7 +38,7 @@ with tab_run:
         selected_channel_name = st.selectbox("Select YouTube Channel", options=list(channel_options.keys()))
         channel_handle = channel_options[selected_channel_name]
         
-        search_keyword = st.text_input("Target Keyword / Item", value="car")
+        search_keyword = st.text_input("Target Keyword / Item", value="wireless chargers")
 
     with col2:
         max_videos = st.slider("Max Videos to Process", min_value=1, max_value=5, value=1)
@@ -82,9 +82,10 @@ with tab_run:
                         channel_url = f"https://www.youtube.com/{channel_handle}/videos"
                         st.write(f"🧭 Navigating to channel: {channel_url}")
                         page.goto(channel_url, timeout=30000)
-                        page.wait_for_selector("ytd-rich-item-renderer", timeout=10000)
+                        page.wait_for_load_state("domcontentloaded")
+                        page.wait_for_timeout(3000)
 
-                        # Handle YouTube cookie consent banner if present
+                        # Dismiss cookie banner if present
                         try:
                             consent_btn = page.locator("button[aria-label*='Accept all' i], ytd-button-renderer:has-text('Accept all')").first
                             if consent_btn.is_visible(timeout=3000):
@@ -93,7 +94,18 @@ with tab_run:
                         except Exception:
                             pass
 
-                        video_elements = page.locator("ytd-rich-item-renderer #video-title").all()
+                        # Scroll down to hydrate video elements
+                        st.write("📜 Scrolling page to trigger lazy-loaded video grid...")
+                        page.mouse.wheel(0, 600)
+                        page.wait_for_timeout(2000)
+
+                        video_elements = []
+                        for sel in ["ytd-rich-item-renderer #video-title", "ytd-grid-video-renderer #video-title", "a#video-title"]:
+                            video_elements = page.locator(sel).all()
+                            if len(video_elements) > 0:
+                                st.write(f"✔️ Found video elements using selector: `{sel}` (Count: {len(video_elements)})")
+                                break
+
                         video_urls = []
                         for el in video_elements[:max_videos]:
                             href = el.get_attribute("href")
@@ -111,24 +123,23 @@ with tab_run:
                             page.wait_for_load_state("domcontentloaded")
                             page.wait_for_timeout(3000)
 
-                            # Step: Click ...more to reveal transcript trigger
+                            # Expand description (...more)
                             st.write("🔍 Expanding video description (...more)...")
                             expanded = False
                             for sel in ["button#expand", "tp-yt-paper-button#expand", "text=...more"]:
                                 try:
                                     page.click(sel, timeout=3000)
                                     expanded = True
-                                    st.write(f"✔️ Successfully clicked description expander using: `{sel}`")
+                                    st.write(f"✔️ Clicked description expander using: `{sel}`")
                                     break
                                 except Exception:
                                     continue
                             
                             if not expanded:
-                                st.write("⚠️ Could not find description expander button directly, scrolling down...")
                                 page.mouse.wheel(0, 300)
                                 page.wait_for_timeout(1000)
 
-                            # Step: Click Show transcript
+                            # Open transcript panel
                             st.write("📂 Looking for 'Show transcript' button...")
                             transcript_opened = False
                             for sel in [
@@ -140,13 +151,12 @@ with tab_run:
                                 try:
                                     page.click(sel, timeout=4000)
                                     transcript_opened = True
-                                    st.write(f"✔️ Successfully opened transcript panel using selector: `{sel}`")
+                                    st.write(f"✔️ Opened transcript panel using selector: `{sel}`")
                                     break
                                 except Exception:
                                     continue
 
                             if not transcript_opened:
-                                st.write("⚠️ Transcript button not immediately visible, attempting JS click fallback...")
                                 try:
                                     page.evaluate("""() => {
                                         const buttons = Array.from(document.querySelectorAll('button, yt-formatted-string'));
@@ -155,11 +165,11 @@ with tab_run:
                                     }""")
                                     page.wait_for_timeout(2000)
                                     transcript_opened = True
-                                    st.write("✔️ JS fallback click executed.")
+                                    st.write("✔️ JS fallback click executed for transcript.")
                                 except Exception as e:
                                     st.write(f"❌ Failed JS fallback: {e}")
 
-                            # Step: Extract segments
+                            # Extract segments
                             if transcript_opened:
                                 st.write("⏳ Waiting for transcript segments to render in DOM...")
                                 try:
@@ -168,7 +178,7 @@ with tab_run:
                                     page.wait_for_timeout(3000)
 
                                 segments = page.locator("ytd-transcript-segment-renderer").all()
-                                st.write(f"📊 Extracted {len(segments)} segment renderer(s) from DOM.")
+                                st.write(f"📊 Extracted {len(segments)} segment renderer(s).")
 
                                 seg_texts, seg_times = [], []
                                 for seg in segments:
@@ -178,7 +188,6 @@ with tab_run:
                                     except Exception:
                                         continue
 
-                                st.write(f"🔎 Scanning text segments for keyword tokens: {keyword_tokens}")
                                 for i in range(len(seg_texts)):
                                     window_text = " ".join(seg_texts[i:min(i + 3, len(seg_texts))])
                                     window_lower = window_text.lower()
@@ -243,7 +252,7 @@ with tab_run:
                         st.download_button("📥 Download Structured PDF Report", f, file_name="LfD_Report.pdf", mime="application/pdf")
                 else:
                     status_box.update(label="⚠️ Execution finished, but no matching segments were captured.", state="error", expanded=True)
-                    st.warning("Check the live status box above to see if the transcript button click or cookie banner dismissal was blocked.")
+                    st.warning("Check the live status box above to verify video element detection.")
 
 with tab_studio:
     st.header("🛠️ LfD Workflow Studio")
