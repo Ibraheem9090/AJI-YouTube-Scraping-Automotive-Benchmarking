@@ -27,7 +27,7 @@ st.sidebar.header("Pipeline Configuration")
 
 channel_or_video_url = st.sidebar.text_input(
     "YouTube Channel or Video URL", 
-    value="https://www.youtube.com/@rsloncars"
+    value="https://www.youtube.com/@rsloncars/videos"
 )
 
 search_keyword = st.sidebar.text_input(
@@ -39,17 +39,22 @@ max_videos = st.sidebar.slider("Max Videos to Process", min_value=1, max_value=5
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 Nemotron VLM Settings")
+
+# Automatically pull from st.secrets if configured, otherwise use fallbacks
+default_base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
+default_api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
+
 nemotron_base_url = st.sidebar.text_input(
     "Nemotron API Base URL", 
-    value="http://localhost:8000/v1",
+    value=default_base_url,
     help="URL endpoint for your hosted vLLM or NVIDIA NIM server running nvidia/nemotron-3-nano-omni-30b-a3b-reasoning."
 )
 
 nemotron_api_key = st.sidebar.text_input(
     "LLM API Key (e.g., NVIDIA NIM Key)", 
-    value="not-needed", 
+    value=default_api_key, 
     type="password",
-    help="Enter your API key if your endpoint requires authentication (leave 'not-needed' if running locally via vLLM)."
+    help="Enter your API key or configure it in .streamlit/secrets.toml."
 )
 
 user_prompt = st.sidebar.text_area(
@@ -76,8 +81,12 @@ def extract_video_id(url):
 
 def get_videos_from_source(url, limit=1):
     """Fetches video entries using yt-dlp metadata extraction without downloading media."""
+    # Ensure channel URLs point to the /videos tab to retrieve valid video IDs
+    if "@" in url and not url.endswith(("/videos", "/shorts", "/streams")):
+        url = url.rstrip("/") + "/videos"
+        
     ydl_opts = {
-        'extract_flat': True,
+        'extract_flat': 'in_playlist',
         'skip_download': True,
         'playlistend': limit
     }
@@ -87,17 +96,22 @@ def get_videos_from_source(url, limit=1):
             info = ydl.extract_info(url, download=False)
             if 'entries' in info:
                 for entry in info['entries']:
-                    videos.append({
-                        'id': entry.get('id'),
-                        'title': entry.get('title'),
-                        'url': f"https://www.youtube.com/watch?v={entry.get('id')}"
-                    })
+                    vid_id = entry.get('id')
+                    # Filter out channel IDs starting with 'UC'
+                    if vid_id and not vid_id.startswith('UC'):
+                        videos.append({
+                            'id': vid_id,
+                            'title': entry.get('title', 'Unknown Title'),
+                            'url': f"https://www.youtube.com/watch?v={vid_id}"
+                        })
             else:
-                videos.append({
-                    'id': info.get('id'),
-                    'title': info.get('title'),
-                    'url': url
-                })
+                vid_id = info.get('id')
+                if vid_id and not vid_id.startswith('UC'):
+                    videos.append({
+                        'id': vid_id,
+                        'title': info.get('title', 'Unknown Title'),
+                        'url': url
+                    })
     except Exception as e:
         st.error(f"Error fetching channel metadata: {str(e)}")
     return videos
@@ -106,26 +120,42 @@ def phase1_transcript_check(video_id, keyword):
     """Phase 1: Attempts to fetch transcripts and locate keyword timestamps."""
     matches = []
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        ytt_api = YouTubeTranscriptApi()
+        transcript_list = ytt_api.list(video_id)
+        
         transcript = None
         for t in transcript_list:
             if 'en' in t.language_code or 'zh' in t.language_code:
                 transcript = t.fetch()
                 break
         if not transcript:
-            transcript = transcript_list.find_generated_transcript(['en', 'zh-Hans', 'zh-Hant']).fetch()
+            try:
+                transcript = transcript_list.find_generated_transcript(['en', 'zh-Hans', 'zh-Hant']).fetch()
+            except Exception:
+                for t in transcript_list:
+                    transcript = t.fetch()
+                    break
 
-        for entry in transcript:
-            if keyword.lower() in entry['text'].lower():
-                matches.append({
-                    'start_time': entry['start'],
-                    'text': entry['text']
-                })
+        if transcript:
+            for entry in transcript:
+                if keyword.lower() in entry['text'].lower():
+                    matches.append({
+                        'start_time': entry['start'],
+                        'text': entry['text']
+                    })
     except (TranscriptsDisabled, NoTranscriptFound):
         return None
     except Exception as e:
-        st.warning(f"Transcript fetch warning for video {video_id}: {str(e)}")
-        return None
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'zh-Hans', 'zh-Hant', 'zh'])
+            for entry in transcript:
+                if keyword.lower() in entry['text'].lower():
+                    matches.append({
+                        'start_time': entry['start'],
+                        'text': entry['text']
+                    })
+        except Exception:
+            return None
     return matches
 
 def phase2_fallback_sampling(video_url, output_dir):
@@ -284,7 +314,7 @@ if run_button:
         videos = get_videos_from_source(channel_or_video_url, limit=max_videos)
         
         if not videos:
-            st.warning("No videos found from the provided URL.")
+            st.warning("No valid videos found from the provided URL. Please ensure channel URLs target the `/videos` tab.")
         else:
             all_results = []
             temp_dir = tempfile.mkdtemp()
