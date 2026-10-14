@@ -1,0 +1,33 @@
+{
+  "workflow_name": "youtube_channel_transcript_extractor",
+  "target_channels": ["@rsloncars", "@CCR-Galib"],
+  "description": "JSON-driven LfD workflow for navigating channels, opening videos, expanding transcripts, and searching keywords.",
+  "steps": [
+    {
+      "step": 1,
+      "action": "navigate_channel",
+      "target_url_template": "https://www.youtube.com/{channel}/videos"
+    },
+    {
+      "step": 2,
+      "action": "click_first_video",
+      "selector": "ytd-rich-item-renderer #video-title"
+    },
+    {
+      "step": 3,
+      "action": "open_transcript_panel",
+      "selectors": [
+        "button[aria-label*='Show transcript' i]",
+        "button[aria-label*='transcript' i]",
+        "text=Show transcript"
+      ]
+    },
+    {
+      "step": 4,
+      "action": "extract_and_match_segments",
+      "container": "ytd-transcript-segment-renderer",
+      "timestamp_field": ".segment-timestamp",
+      "text_field": ".segment-text"
+    }
+  ]
+}
