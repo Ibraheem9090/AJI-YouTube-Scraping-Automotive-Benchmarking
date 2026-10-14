@@ -3,7 +3,6 @@ import json
 import subprocess
 import streamlit as st
 
-# Safe, cached installation of Playwright Chromium binary in Streamlit Cloud
 @st.cache_resource
 def ensure_playwright_installed():
     try:
@@ -16,13 +15,11 @@ ensure_playwright_installed()
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
 
-# ReportLab imports for PDF Generation
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 
-# Streamlit Page Config
 st.set_page_config(page_title="AI YouTube Car Part Analyzer (LfD Studio)", layout="wide")
 
 st.title("🚗 AI Automotive Video & Part Analyzer (LfD Studio) — By Ibraheem")
@@ -32,9 +29,6 @@ WORKFLOW_FILE = "youtube_workflow.json"
 
 tab_run, tab_studio = st.tabs(["🚀 Run Benchmarking Pipeline", "🛠️ LfD Workflow Studio (Recorder & JSON Manager)"])
 
-# ==========================================
-# TAB 1: RUN BENCHMARKING PIPELINE
-# ==========================================
 with tab_run:
     st.header("Automated LfD Benchmarking Execution")
     
@@ -44,7 +38,7 @@ with tab_run:
         selected_channel_name = st.selectbox("Select YouTube Channel", options=list(channel_options.keys()))
         channel_handle = channel_options[selected_channel_name]
         
-        search_keyword = st.text_input("Target Keyword / Item", value="wireless chargers")
+        search_keyword = st.text_input("Target Keyword / Item", value="car")
 
     with col2:
         max_videos = st.slider("Max Videos to Process", min_value=1, max_value=5, value=1)
@@ -59,14 +53,13 @@ with tab_run:
         if not os.path.exists(WORKFLOW_FILE):
             st.error(f"Workflow file '{WORKFLOW_FILE}' not found! Please check the Workflow Studio tab.")
         else:
-            with st.spinner("Executing demonstrated LfD workflow steps via Playwright..."):
-                with open(WORKFLOW_FILE, "r") as f:
-                    workflow = json.load(f)
-
+            status_box = st.status("Initializing LfD Workflow...", expanded=True)
+            
+            with status_box:
                 all_matches = []
-                
                 with sync_playwright() as p:
                     try:
+                        st.write("🌐 Launching headless Chromium container...")
                         browser = p.chromium.launch(
                             headless=True,
                             args=[
@@ -81,16 +74,25 @@ with tab_run:
                             ]
                         )
                         context = browser.new_context(
-                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                            viewport={"width": 1280, "height": 800}
                         )
                         page = context.new_page()
 
-                        # Step 1: Navigate to channel
                         channel_url = f"https://www.youtube.com/{channel_handle}/videos"
+                        st.write(f"🧭 Navigating to channel: {channel_url}")
                         page.goto(channel_url, timeout=30000)
                         page.wait_for_selector("ytd-rich-item-renderer", timeout=10000)
 
-                        # Step 2: Get video URLs dynamically
+                        # Handle YouTube cookie consent banner if present
+                        try:
+                            consent_btn = page.locator("button[aria-label*='Accept all' i], ytd-button-renderer:has-text('Accept all')").first
+                            if consent_btn.is_visible(timeout=3000):
+                                consent_btn.click()
+                                st.write("🍪 Dismissed YouTube cookie consent banner.")
+                        except Exception:
+                            pass
+
                         video_elements = page.locator("ytd-rich-item-renderer #video-title").all()
                         video_urls = []
                         for el in video_elements[:max_videos]:
@@ -100,58 +102,73 @@ with tab_run:
                                     href = f"https://www.youtube.com{href}"
                                 video_urls.append(href)
 
+                        st.write(f"🎬 Found {len(video_urls)} video URL(s) to process.")
                         keyword_tokens = [t.lower() for t in search_keyword.split()]
 
                         for v_url in video_urls:
-                            st.write(f"🌐 Navigating to video: {v_url}")
+                            st.write(f"🌐 Opening video page: {v_url}")
                             page.goto(v_url, timeout=30000)
                             page.wait_for_load_state("domcontentloaded")
-                            page.wait_for_timeout(2000) # Allow initial hydration
+                            page.wait_for_timeout(3000)
 
-                            # Step 3: Expand description (...more) matching codegen
-                            try:
-                                page.get_by_role("button", name="...more").click(timeout=3000)
-                                page.wait_for_timeout(1000)
-                            except Exception:
+                            # Step: Click ...more to reveal transcript trigger
+                            st.write("🔍 Expanding video description (...more)...")
+                            expanded = False
+                            for sel in ["button#expand", "tp-yt-paper-button#expand", "text=...more"]:
                                 try:
-                                    page.click("button#expand, tp-yt-paper-button#expand", timeout=2000)
+                                    page.click(sel, timeout=3000)
+                                    expanded = True
+                                    st.write(f"✔️ Successfully clicked description expander using: `{sel}`")
+                                    break
                                 except Exception:
-                                    pass
+                                    continue
+                            
+                            if not expanded:
+                                st.write("⚠️ Could not find description expander button directly, scrolling down...")
+                                page.mouse.wheel(0, 300)
+                                page.wait_for_timeout(1000)
 
-                            # Step 4: Open transcript panel matching codegen
+                            # Step: Click Show transcript
+                            st.write("📂 Looking for 'Show transcript' button...")
                             transcript_opened = False
-                            try:
-                                page.get_by_role("button", name="Show transcript").click(timeout=4000)
-                                transcript_opened = True
-                            except Exception:
-                                for sel in ["button[aria-label*='Show transcript' i]", "button:has-text('Show transcript')", "text=Show transcript"]:
-                                    try:
-                                        page.click(sel, timeout=3000)
-                                        transcript_opened = True
-                                        break
-                                    except Exception:
-                                        continue
+                            for sel in [
+                                "button[aria-label*='Show transcript' i]", 
+                                "button:has-text('Show transcript')", 
+                                "text=Show transcript",
+                                "ytd-button-renderer:has-text('Transcript')"
+                            ]:
+                                try:
+                                    page.click(sel, timeout=4000)
+                                    transcript_opened = True
+                                    st.write(f"✔️ Successfully opened transcript panel using selector: `{sel}`")
+                                    break
+                                except Exception:
+                                    continue
 
                             if not transcript_opened:
-                                page.mouse.wheel(0, 400)
-                                page.wait_for_timeout(1500)
-                                for sel in ["button[aria-label*='Show transcript' i]", "button:has-text('Show transcript')"]:
-                                    try:
-                                        page.click(sel, timeout=3000)
-                                        transcript_opened = True
-                                        break
-                                    except Exception:
-                                        continue
-
-                            # Step 5: Extract transcript segments and match keyword with robust wait
-                            if transcript_opened:
+                                st.write("⚠️ Transcript button not immediately visible, attempting JS click fallback...")
                                 try:
-                                    page.wait_for_selector("ytd-transcript-segment-renderer", timeout=10000)
+                                    page.evaluate("""() => {
+                                        const buttons = Array.from(document.querySelectorAll('button, yt-formatted-string'));
+                                        const btn = buttons.find(b => b.innerText && b.innerText.toLowerCase().includes('transcript'));
+                                        if (btn) btn.click();
+                                    }""")
+                                    page.wait_for_timeout(2000)
+                                    transcript_opened = True
+                                    st.write("✔️ JS fallback click executed.")
+                                except Exception as e:
+                                    st.write(f"❌ Failed JS fallback: {e}")
+
+                            # Step: Extract segments
+                            if transcript_opened:
+                                st.write("⏳ Waiting for transcript segments to render in DOM...")
+                                try:
+                                    page.wait_for_selector("ytd-transcript-segment-renderer", timeout=8000)
                                 except Exception:
                                     page.wait_for_timeout(3000)
 
                                 segments = page.locator("ytd-transcript-segment-renderer").all()
-                                st.write(f"🔍 Extracted {len(segments)} transcript segments from DOM.")
+                                st.write(f"📊 Extracted {len(segments)} segment renderer(s) from DOM.")
 
                                 seg_texts, seg_times = [], []
                                 for seg in segments:
@@ -161,6 +178,7 @@ with tab_run:
                                     except Exception:
                                         continue
 
+                                st.write(f"🔎 Scanning text segments for keyword tokens: {keyword_tokens}")
                                 for i in range(len(seg_texts)):
                                     window_text = " ".join(seg_texts[i:min(i + 3, len(seg_texts))])
                                     window_lower = window_text.lower()
@@ -170,9 +188,10 @@ with tab_run:
                                             'timestamp': seg_times[i],
                                             'ocr_text': window_text.replace('\n', ' ')
                                         })
+                                        st.write(f"✨ Match found at timestamp {seg_times[i]}!")
                                         break
                             else:
-                                st.warning("Could not open transcript panel for this video.")
+                                st.write("❌ Could not open transcript panel.")
 
                     except Exception as e:
                         st.error(f"Automation execution error: {str(e)}")
@@ -183,9 +202,10 @@ with tab_run:
                             pass
 
                 if all_matches:
-                    st.success(f"✅ Successfully extracted {len(all_matches)} matching segment(s) via LfD workflow!")
-                    all_results = []
+                    status_box.update(label="✅ Workflow Execution Complete & Successful!", state="complete", expanded=False)
+                    st.success(f"Successfully processed {len(all_matches)} matching segment(s)!")
                     
+                    all_results = []
                     base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
                     api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
                     client = OpenAI(base_url=base_url, api_key=api_key)
@@ -204,7 +224,6 @@ with tab_run:
 
                         all_results.append({**match, 'analysis': analysis_text})
 
-                    # Compile PDF Report
                     doc = SimpleDocTemplate("Transcript_Analysis_Report.pdf", pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
                     styles = getSampleStyleSheet()
                     story = [
@@ -223,11 +242,9 @@ with tab_run:
                     with open("Transcript_Analysis_Report.pdf", "rb") as f:
                         st.download_button("📥 Download Structured PDF Report", f, file_name="LfD_Report.pdf", mime="application/pdf")
                 else:
-                    st.warning("No matching transcript segments found using the demonstrated LfD steps.")
+                    status_box.update(label="⚠️ Execution finished, but no matching segments were captured.", state="error", expanded=True)
+                    st.warning("Check the live status box above to see if the transcript button click or cookie banner dismissal was blocked.")
 
-# ==========================================
-# TAB 2: LfD WORKFLOW STUDIO
-# ==========================================
 with tab_studio:
     st.header("🛠️ LfD Workflow Studio")
     st.markdown("Inspect and manage your recorded LfD workflow JSON schema stored in Git.")
