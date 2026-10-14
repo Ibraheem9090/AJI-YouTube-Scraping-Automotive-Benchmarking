@@ -21,14 +21,19 @@ st.markdown("Automated multi-modal pipeline for Chinese car review channels (`@r
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("Pipeline Configuration")
 
-# Restricted channel selector containing ONLY the two requested channels
-channel_or_video_url = st.sidebar.selectbox(
+# Clean channel mapping using short handles for the UI dropdown
+channel_options = {
+    "@rsloncars": "https://www.youtube.com/@rsloncars",
+    "@CCR-Galib": "https://www.youtube.com/@CCR-Galib"
+}
+
+selected_channel_name = st.sidebar.selectbox(
     "Select YouTube Channel",
-    options=[
-        "https://www.youtube.com/@rsloncars",
-        "https://www.youtube.com/@CCR-Galib"
-    ]
+    options=list(channel_options.keys())
 )
+
+# Resolves to the full URL in the background
+channel_or_video_url = channel_options[selected_channel_name]
 
 search_keyword = st.sidebar.text_input(
     "Target Keyword / Item (e.g., screen, battery, dashboard)", 
