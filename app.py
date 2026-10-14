@@ -100,15 +100,32 @@ def get_videos_from_source(url, limit=1):
     return videos
 
 def phase1_transcript_check(video_id, keyword):
-    """Phase 1: Uses a sliding window across transcript fragments to catch multi-word keywords."""
+    """Phase 1: Robust multi-method transcript fetching with sliding window phrase matching."""
     matches = []
+    transcript = None
+    
+    # Try multiple fetching approaches to handle version differences in youtube-transcript-api
+    methods = [
+        lambda: YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'zh', 'zh-Hans', 'zh-Hant']),
+        lambda: YouTubeTranscriptApi.list_transcripts(video_id).find_transcript(['en', 'zh', 'zh-Hans', 'zh-Hant']).fetch(),
+        lambda: YouTubeTranscriptApi.list_transcripts(video_id).__iter__().__next__().fetch(),
+        lambda: YouTubeTranscriptApi().list(video_id).__iter__().__next__().fetch()
+    ]
+    
+    for method in methods:
+        try:
+            transcript = method()
+            if transcript:
+                break
+        except Exception:
+            continue
+            
+    if not transcript:
+        return None
+
     try:
-        # Fetch transcript using YouTubeTranscriptApi directly
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'zh-Hans', 'zh-Hant', 'zh'])
-        
         keyword_lower = keyword.lower()
-        
-        # Sliding window of 3 consecutive entries to handle split phrases
+        # Sliding window across 3 consecutive transcript segments to catch split multi-word phrases
         for i in range(len(transcript)):
             window_text = " ".join([transcript[j]['text'] for j in range(i, min(i + 3, len(transcript)))])
             
@@ -117,14 +134,11 @@ def phase1_transcript_check(video_id, keyword):
                     'start_time': transcript[i]['start'],
                     'text': window_text.replace('\n', ' ')
                 })
-                # Skip ahead slightly to avoid redundant duplicate matches for the same sentence
-                
-    except (TranscriptsDisabled, NoTranscriptFound):
-        return None
     except Exception as e:
-        st.warning(f"Transcript fetch warning for video {video_id}: {str(e)}")
+        st.warning(f"Transcript parsing warning for video {video_id}: {str(e)}")
         return None
-    return matches
+        
+    return matches if matches else None
 
 def analyze_with_nemotron_vlm(user_prompt, context_text):
     """Sends transcript context to nvidia/nemotron-3-nano-omni-30b-a3b-reasoning with thinking mode enabled."""
