@@ -21,7 +21,6 @@ st.markdown("Automated multi-modal pipeline for Chinese car review channels (`@r
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("Pipeline Configuration")
 
-# Clean channel mapping using short handles for the UI dropdown
 channel_options = {
     "@rsloncars": "https://www.youtube.com/@rsloncars",
     "@CCR-Galib": "https://www.youtube.com/@CCR-Galib"
@@ -32,12 +31,11 @@ selected_channel_name = st.sidebar.selectbox(
     options=list(channel_options.keys())
 )
 
-# Resolves to the full URL in the background
 channel_or_video_url = channel_options[selected_channel_name]
 
 search_keyword = st.sidebar.text_input(
     "Target Keyword / Item (e.g., screen, battery, dashboard)", 
-    value="screen"
+    value="wireless charger"
 )
 
 max_videos = st.sidebar.slider("Max Videos to Process", min_value=1, max_value=5, value=1)
@@ -102,45 +100,30 @@ def get_videos_from_source(url, limit=1):
     return videos
 
 def phase1_transcript_check(video_id, keyword):
-    """Phase 1: Attempts to fetch transcripts and locate keyword timestamps."""
+    """Phase 1: Uses a sliding window across transcript fragments to catch multi-word keywords."""
     matches = []
     try:
-        ytt_api = YouTubeTranscriptApi()
-        transcript_list = ytt_api.list(video_id)
+        # Fetch transcript using YouTubeTranscriptApi directly
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'zh-Hans', 'zh-Hant', 'zh'])
         
-        transcript = None
-        for t in transcript_list:
-            if 'en' in t.language_code or 'zh' in t.language_code:
-                transcript = t.fetch()
-                break
-        if not transcript:
-            try:
-                transcript = transcript_list.find_generated_transcript(['en', 'zh-Hans', 'zh-Hant']).fetch()
-            except Exception:
-                for t in transcript_list:
-                    transcript = t.fetch()
-                    break
-
-        if transcript:
-            for entry in transcript:
-                if keyword.lower() in entry['text'].lower():
-                    matches.append({
-                        'start_time': entry['start'],
-                        'text': entry['text']
-                    })
+        keyword_lower = keyword.lower()
+        
+        # Sliding window of 3 consecutive entries to handle split phrases
+        for i in range(len(transcript)):
+            window_text = " ".join([transcript[j]['text'] for j in range(i, min(i + 3, len(transcript)))])
+            
+            if keyword_lower in window_text.lower():
+                matches.append({
+                    'start_time': transcript[i]['start'],
+                    'text': window_text.replace('\n', ' ')
+                })
+                # Skip ahead slightly to avoid redundant duplicate matches for the same sentence
+                
     except (TranscriptsDisabled, NoTranscriptFound):
         return None
     except Exception as e:
-        try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'zh-Hans', 'zh-Hant', 'zh'])
-            for entry in transcript:
-                if keyword.lower() in entry['text'].lower():
-                    matches.append({
-                        'start_time': entry['start'],
-                        'text': entry['text']
-                    })
-        except Exception:
-            return None
+        st.warning(f"Transcript fetch warning for video {video_id}: {str(e)}")
+        return None
     return matches
 
 def analyze_with_nemotron_vlm(user_prompt, context_text):
