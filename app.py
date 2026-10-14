@@ -82,8 +82,11 @@ with tab_run:
                         channel_url = f"https://www.youtube.com/{channel_handle}/videos"
                         st.write(f"🧭 Navigating to channel: {channel_url}")
                         page.goto(channel_url, timeout=30000)
-                        page.wait_for_load_state("domcontentloaded")
-                        page.wait_for_timeout(3000)
+                        
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception:
+                            page.wait_for_timeout(4000)
 
                         # Dismiss cookie banner if present
                         try:
@@ -96,28 +99,29 @@ with tab_run:
 
                         # Scroll down to hydrate video elements
                         st.write("📜 Scrolling page to trigger lazy-loaded video grid...")
-                        page.mouse.wheel(0, 600)
-                        page.wait_for_timeout(2000)
+                        for _ in range(3):
+                            page.mouse.wheel(0, 800)
+                            page.wait_for_timeout(1500)
 
-                        video_elements = []
-                        for sel in ["ytd-rich-item-renderer #video-title", "ytd-grid-video-renderer #video-title", "a#video-title"]:
-                            video_elements = page.locator(sel).all()
-                            if len(video_elements) > 0:
-                                st.write(f"✔️ Found video elements using selector: `{sel}` (Count: {len(video_elements)})")
-                                break
+                        # Bulletproof JS extraction
+                        st.write("🔎 Extracting video URLs via robust DOM JavaScript query...")
+                        video_urls = page.evaluate("""() => {
+                            const anchors = Array.from(document.querySelectorAll('a'));
+                            const urls = [];
+                            anchors.forEach(a => {
+                                if (a.href && a.href.includes('/watch?v=') && !urls.includes(a.href)) {
+                                    if (!a.href.includes('/shorts/') && !a.href.includes('/playlist?')) {
+                                        urls.push(a.href.split('&')[0]);
+                                    }
+                                }
+                            });
+                            return [...new Set(urls)];
+                        }""")
 
-                        video_urls = []
-                        for el in video_elements[:max_videos]:
-                            href = el.get_attribute("href")
-                            if href:
-                                if href.startswith("/"):
-                                    href = f"https://www.youtube.com{href}"
-                                video_urls.append(href)
-
-                        st.write(f"🎬 Found {len(video_urls)} video URL(s) to process.")
+                        st.write(f"🎬 Found {len(video_urls)} video URL(s) to process: {video_urls[:max_videos]}")
                         keyword_tokens = [t.lower() for t in search_keyword.split()]
 
-                        for v_url in video_urls:
+                        for v_url in video_urls[:max_videos]:
                             st.write(f"🌐 Opening video page: {v_url}")
                             page.goto(v_url, timeout=30000)
                             page.wait_for_load_state("domcontentloaded")
@@ -252,7 +256,7 @@ with tab_run:
                         st.download_button("📥 Download Structured PDF Report", f, file_name="LfD_Report.pdf", mime="application/pdf")
                 else:
                     status_box.update(label="⚠️ Execution finished, but no matching segments were captured.", state="error", expanded=True)
-                    st.warning("Check the live status box above to verify video element detection.")
+                    st.warning("Check the live status box above to verify video URL extraction.")
 
 with tab_studio:
     st.header("🛠️ LfD Workflow Studio")
