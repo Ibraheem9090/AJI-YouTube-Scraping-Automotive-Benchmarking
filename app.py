@@ -45,6 +45,13 @@ nemotron_base_url = st.sidebar.text_input(
     help="URL endpoint for your hosted vLLM or NVIDIA NIM server running nvidia/nemotron-3-nano-omni-30b-a3b-reasoning."
 )
 
+nemotron_api_key = st.sidebar.text_input(
+    "LLM API Key (e.g., NVIDIA NIM Key)", 
+    value="not-needed", 
+    type="password",
+    help="Enter your API key if your endpoint requires authentication (leave 'not-needed' if running locally via vLLM)."
+)
+
 user_prompt = st.sidebar.text_area(
     "Custom AI Prompt Instructions:",
     value="Analyze the component's visible specifications, physical condition, UI elements, and exact positioning within the vehicle cabin.",
@@ -151,7 +158,6 @@ def phase2_fallback_sampling(video_url, output_dir):
                 
             timestamp_sec = frame_idx / fps
             
-            # Simple heuristic classification placeholder (Interior vs Exterior)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             is_interior = np.mean(gray) < 120
             location_tag = "Interior" if is_interior else "Exterior"
@@ -176,10 +182,10 @@ def phase2_fallback_sampling(video_url, output_dir):
         
     return extracted_frames
 
-def analyze_with_nemotron_vlm(image_path, user_prompt, context_text, base_url):
+def analyze_with_nemotron_vlm(image_path, user_prompt, context_text, base_url, api_key):
     """Sends frame and context to nvidia/nemotron-3-nano-omni-30b-a3b-reasoning with thinking mode enabled."""
     try:
-        client = OpenAI(base_url=base_url, api_key="not-needed")
+        client = OpenAI(base_url=base_url, api_key=api_key)
         
         messages_content = [
             {
@@ -297,12 +303,12 @@ if run_button:
                         secs = int(match['start_time'] % 60)
                         timestamp_str = f"{mins:02d}:{secs:02d}"
                         
-                        # Call Nemotron VLM
                         ai_analysis = analyze_with_nemotron_vlm(
                             image_path="", 
                             user_prompt=user_prompt, 
                             context_text=match['text'], 
-                            base_url=nemotron_base_url
+                            base_url=nemotron_base_url,
+                            api_key=nemotron_api_key
                         )
                         
                         all_results.append({
@@ -322,12 +328,12 @@ if run_button:
                         secs = int(frame['timestamp'] % 60)
                         timestamp_str = f"{mins:02d}:{secs:02d}"
                         
-                        # Call Nemotron VLM with image snapshot & OCR context
                         ai_analysis = analyze_with_nemotron_vlm(
                             image_path=frame['image_path'], 
                             user_prompt=user_prompt, 
                             context_text=frame['ocr_text'], 
-                            base_url=nemotron_base_url
+                            base_url=nemotron_base_url,
+                            api_key=nemotron_api_key
                         )
                         
                         all_results.append({
