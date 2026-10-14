@@ -21,9 +21,13 @@ st.markdown("Automated multi-modal pipeline for Chinese car review channels (`@r
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("Pipeline Configuration")
 
-channel_or_video_url = st.sidebar.text_input(
-    "YouTube Channel or Video URL", 
-    value="https://www.youtube.com/@rsloncars/videos"
+# Restricted channel selector containing ONLY the two requested channels
+channel_or_video_url = st.sidebar.selectbox(
+    "Select YouTube Channel",
+    options=[
+        "https://www.youtube.com/@rsloncars",
+        "https://www.youtube.com/@CCR-Galib"
+    ]
 )
 
 search_keyword = st.sidebar.text_input(
@@ -36,7 +40,6 @@ max_videos = st.sidebar.slider("Max Videos to Process", min_value=1, max_value=5
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 Nemotron VLM Settings")
 
-# Automatically pull from st.secrets if configured, otherwise use fallbacks
 default_base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
 default_api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
 
@@ -240,7 +243,7 @@ if run_button:
         videos = get_videos_from_source(channel_or_video_url, limit=max_videos)
         
         if not videos:
-            st.warning("No valid videos found from the provided URL. Please ensure channel URLs target the `/videos` tab.")
+            st.warning("No valid videos found from the selected URL.")
         else:
             all_results = []
             
@@ -248,7 +251,6 @@ if run_button:
                 st.write(f"Processing video: **{vid['title']}**")
                 video_id = extract_video_id(vid['url'])
                 
-                # --- PHASE 1: Transcript Check Only ---
                 transcript_matches = phase1_transcript_check(video_id, search_keyword) if video_id else None
                 
                 if transcript_matches:
@@ -274,7 +276,6 @@ if run_button:
                 else:
                     st.warning(f"ℹ️ Transcript missing or keyword '{search_keyword}' not found for video: {vid['title']}.")
 
-            # --- PDF Report Generation ---
             if all_results:
                 pdf_filename = generate_pdf_report(all_results)
                 st.success("🎉 Analysis complete and structured PDF report successfully generated!")
