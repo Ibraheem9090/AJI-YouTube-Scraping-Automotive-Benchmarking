@@ -2,7 +2,7 @@ import os
 import json
 import streamlit as st
 
-# Automatically install Chromium browser binaries if running in Streamlit Cloud / headless Linux
+# Automatically install Chromium if missing in cloud container
 os.system("playwright install chromium")
 
 from playwright.sync_api import sync_playwright
@@ -18,18 +18,17 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI YouTube Car Part Analyzer (LfD Studio)", layout="wide")
 
 st.title("🚗 AI Automotive Video & Part Analyzer (LfD Studio) — By Ibraheem")
-st.markdown("Interactive Learning-from-Demonstration (LfD) pipeline. Record, test, and save JSON workflows in Git, process transcripts via **Nvidia Nemotron VLM**, and compile structured PDF reports.")
+st.markdown("Declarative LfD pipeline driven by your recorded browser demonstration, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
-# --- NAVIGATION TABS ---
 tab_run, tab_studio = st.tabs(["🚀 Run Benchmarking Pipeline", "🛠️ LfD Workflow Studio (Recorder & JSON Manager)"])
 
 # ==========================================
 # TAB 1: RUN BENCHMARKING PIPELINE
 # ==========================================
 with tab_run:
-    st.header("Automated Benchmarking Execution")
+    st.header("Automated LfD Benchmarking Execution")
     
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -46,13 +45,13 @@ with tab_run:
             value="Analyze the component's specifications, features, and context mentioned in this transcript segment."
         )
 
-    run_button = st.button("🚀 Run LfD Pipeline & Generate PDF Report")
+    run_button = st.button("🚀 Run Demonstrated LfD Workflow & Generate PDF")
 
     if run_button:
         if not os.path.exists(WORKFLOW_FILE):
-            st.error(f"Workflow file '{WORKFLOW_FILE}' not found! Please define it in the LfD Workflow Studio tab.")
+            st.error(f"Workflow file '{WORKFLOW_FILE}' not found! Please check the Workflow Studio tab.")
         else:
-            with st.spinner("Executing LfD JSON workflow and querying Nemotron VLM..."):
+            with st.spinner("Executing demonstrated LfD workflow steps via Playwright..."):
                 with open(WORKFLOW_FILE, "r") as f:
                     workflow = json.load(f)
 
@@ -63,10 +62,12 @@ with tab_run:
                     page = context.new_page()
 
                     try:
+                        # Step 1: Navigate to channel
                         channel_url = f"https://www.youtube.com/{channel_handle}/videos"
                         page.goto(channel_url, timeout=30000)
                         page.wait_for_selector("ytd-rich-item-renderer", timeout=10000)
 
+                        # Step 2: Get video URLs dynamically
                         video_elements = page.locator("ytd-rich-item-renderer #video-title").all()
                         video_urls = []
                         for el in video_elements[:max_videos]:
@@ -79,41 +80,41 @@ with tab_run:
                         keyword_tokens = [t.lower() for t in search_keyword.split()]
 
                         for v_url in video_urls:
-                            st.write(f"🌐 Processing video: {v_url}")
+                            st.write(f"🌐 Navigating to video: {v_url}")
                             page.goto(v_url, timeout=30000)
                             page.wait_for_load_timeout(2500)
 
-                            # Open description expander if available
+                            # Step 3: Expand description (...more) as demonstrated in codegen
                             try:
-                                page.click("tp-yt-paper-button#expand", timeout=2000)
+                                page.click("button#expand, tp-yt-paper-button#expand", timeout=3000)
                             except Exception:
                                 pass
 
-                            # Execute LfD Steps from JSON
+                            # Step 4: Open transcript panel
                             transcript_opened = False
-                            for step in workflow.get('steps', []):
-                                if step.get('action') == 'open_transcript_panel':
-                                    for selector in step.get('selectors', []):
-                                        try:
-                                            page.click(selector, timeout=3000)
-                                            transcript_opened = True
-                                            break
-                                        except Exception:
-                                            continue
+                            for sel in ["button[aria-label*='Show transcript' i]", "button:has-text('Show transcript')"]:
+                                try:
+                                    page.click(sel, timeout=3000)
+                                    transcript_opened = True
+                                    break
+                                except Exception:
+                                    continue
 
                             if not transcript_opened:
-                                page.mouse.wheel(0, 350)
+                                # Fallback scroll
+                                page.mouse.wheel(0, 400)
                                 page.wait_for_timeout(1500)
-                                for selector in ["button[aria-label*='transcript' i]", "text=Show transcript"]:
+                                for sel in ["button[aria-label*='Show transcript' i]", "button:has-text('Show transcript')"]:
                                     try:
-                                        page.click(selector, timeout=3000)
+                                        page.click(sel, timeout=3000)
                                         transcript_opened = True
                                         break
                                     except Exception:
                                         continue
 
+                            # Step 5: Extract transcript segments and match keyword
                             if transcript_opened:
-                                page.wait_for_selector("ytd-transcript-segment-renderer", timeout=6000)
+                                page.wait_for_selector("ytd-transcript-segment-renderer", timeout=8000)
                                 segments = page.locator("ytd-transcript-segment-renderer").all()
 
                                 seg_texts, seg_times = [], []
@@ -134,15 +135,15 @@ with tab_run:
                                         })
                                         break
                             else:
-                                st.warning("Could not automatically locate the transcript panel for this video.")
+                                st.warning("Could not open transcript panel for this video.")
 
                     except Exception as e:
-                        st.error(f"Execution error: {str(e)}")
+                        st.error(f"Automation execution error: {str(e)}")
                     finally:
                         browser.close()
 
                 if all_matches:
-                    st.success(f"✅ Found {len(all_matches)} matching segment(s)!")
+                    st.success(f"✅ Successfully extracted {len(all_matches)} matching segment(s) via LfD workflow!")
                     all_results = []
                     
                     base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
@@ -163,7 +164,7 @@ with tab_run:
 
                         all_results.append({**match, 'analysis': analysis_text})
 
-                    # Generate PDF Report
+                    # Compile PDF Report
                     doc = SimpleDocTemplate("Transcript_Analysis_Report.pdf", pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
                     styles = getSampleStyleSheet()
                     story = [
@@ -182,60 +183,28 @@ with tab_run:
                     with open("Transcript_Analysis_Report.pdf", "rb") as f:
                         st.download_button("📥 Download Structured PDF Report", f, file_name="LfD_Report.pdf", mime="application/pdf")
                 else:
-                    st.warning("No matching segments found.")
+                    st.warning("No matching transcript segments found using the demonstrated LfD steps.")
 
 # ==========================================
-# TAB 2: LfD WORKFLOW STUDIO (RECORDER)
+# TAB 2: LfD WORKFLOW STUDIO
 # ==========================================
 with tab_studio:
     st.header("🛠️ LfD Workflow Studio")
-    st.markdown("Inspect, customize, and save your declarative JSON workflow. When you update selectors here, they are instantly saved to `youtube_workflow.json` for Git tracking.")
-
-    # Load existing workflow or provide default template
-    default_workflow = {
-        "workflow_name": "youtube_channel_transcript_extractor",
-        "target_channels": ["@rsloncars", "@CCR-Galib"],
-        "steps": [
-            {"step": 1, "action": "navigate_channel", "target_url_template": "https://www.youtube.com/{channel}/videos"},
-            {"step": 2, "action": "click_first_video", "selector": "ytd-rich-item-renderer #video-title"},
-            {"step": 3, "action": "open_transcript_panel", "selectors": ["button[aria-label*='Show transcript' i]", "button[aria-label*='transcript' i]", "text=Show transcript"]},
-            {"step": 4, "action": "extract_segments", "container": "ytd-transcript-segment-renderer"}
-        ]
-    }
+    st.markdown("Inspect and manage your recorded LfD workflow JSON schema stored in Git.")
 
     if os.path.exists(WORKFLOW_FILE):
         with open(WORKFLOW_FILE, "r") as f:
-            try:
-                current_json_str = f.read()
-            except Exception:
-                current_json_str = json.dumps(default_workflow, indent=4)
+            current_json_str = f.read()
     else:
-        current_json_str = json.dumps(default_workflow, indent=4)
+        current_json_str = "{}"
 
-    # Editable JSON Text Area in Streamlit
     edited_json_str = st.text_area("Edit Workflow JSON Schema", value=current_json_str, height=350)
 
-    col_save, col_test = st.columns(2)
-    with col_save:
-        if st.button("💾 Save Workflow to JSON"):
-            try:
-                parsed_json = json.loads(edited_json_str)
-                with open(WORKFLOW_FILE, "w") as f:
-                    json.dump(parsed_json, f, indent=4)
-                st.success(f"Successfully saved to `{WORKFLOW_FILE}`! You can now commit and push to Git.")
-            except json.JSONDecodeError as e:
-                st.error(f"Invalid JSON format: {str(e)}")
-
-    with col_test:
-        if st.button("🧪 Test Workflow Selectors Live"):
-            st.info("Testing selectors against a sample video from @CCR-Galib...")
-            try:
-                with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=True)
-                    page = browser.new_page()
-                    page.goto("https://www.youtube.com/@CCR-Galib/videos")
-                    page.wait_for_selector("ytd-rich-item-renderer", timeout=8000)
-                    st.success("✅ Successfully connected to channel DOM and validated base selectors!")
-                    browser.close()
-            except Exception as e:
-                st.error(f"Test failed: {str(e)}")
+    if st.button("💾 Save Workflow to JSON"):
+        try:
+            parsed_json = json.loads(edited_json_str)
+            with open(WORKFLOW_FILE, "w") as f:
+                json.dump(parsed_json, f, indent=4)
+            st.success(f"Successfully saved to `{WORKFLOW_FILE}`!")
+        except json.JSONDecodeError as e:
+            st.error(f"Invalid JSON format: {str(e)}")

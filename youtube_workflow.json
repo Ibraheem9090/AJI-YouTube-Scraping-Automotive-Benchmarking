@@ -1,7 +1,7 @@
 {
-  "workflow_name": "youtube_channel_transcript_extractor",
+  "workflow_name": "youtube_lfd_transcript_extractor",
   "target_channels": ["@rsloncars", "@CCR-Galib"],
-  "description": "JSON-driven LfD workflow for navigating channels, opening videos, expanding transcripts, and searching keywords.",
+  "description": "LfD workflow derived from Playwright codegen recording",
   "steps": [
     {
       "step": 1,
@@ -15,19 +15,23 @@
     },
     {
       "step": 3,
-      "action": "open_transcript_panel",
-      "selectors": [
-        "button[aria-label*='Show transcript' i]",
-        "button[aria-label*='transcript' i]",
-        "text=Show transcript"
-      ]
+      "action": "expand_description",
+      "selector": "button#expand, tp-yt-paper-button#expand"
     },
     {
       "step": 4,
-      "action": "extract_and_match_segments",
+      "action": "open_transcript",
+      "selectors": [
+        "button[aria-label*='Show transcript' i]",
+        "button:has-text('Show transcript')"
+      ]
+    },
+    {
+      "step": 5,
+      "action": "extract_segments",
       "container": "ytd-transcript-segment-renderer",
-      "timestamp_field": ".segment-timestamp",
-      "text_field": ".segment-text"
+      "timestamp": ".segment-timestamp",
+      "text": ".segment-text"
     }
   ]
 }
