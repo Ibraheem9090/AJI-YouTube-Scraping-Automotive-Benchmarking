@@ -1,8 +1,5 @@
 streamlit
-yt-dlp
-youtube-transcript-api
-opencv-python-headless
-pillow
-reportlab
+playwright
 openai
-numpy
+reportlab
+yt-dlp
