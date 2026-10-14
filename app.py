@@ -15,7 +15,7 @@ from reportlab.lib import colors
 # Streamlit Page Config
 st.set_page_config(page_title="AI YouTube Car Part Analyzer (Transcript-Only)", layout="wide")
 
-st.title("🚗 AI Automotive Video & Part Analyzer (Transcript-Only Pipeline)")
+st.title("🚗 AI Automotive Video & Part Analyzer (Transcript-Only Pipeline) — By Ibraheem")
 st.markdown("Automated multi-modal pipeline for Chinese car review channels (`@rsloncars`, `@CCR-Galib`), utilizing direct transcript timestamp extraction, processed via **Nvidia Nemotron-3 Nano Omni Reasoning VLM**, and compiled into a structured PDF report.")
 
 # --- SIDEBAR CONFIGURATION ---
@@ -43,23 +43,6 @@ search_keyword = st.sidebar.text_input(
 max_videos = st.sidebar.slider("Max Videos to Process", min_value=1, max_value=5, value=1)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🤖 Nemotron VLM Settings")
-
-default_base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
-default_api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
-
-nemotron_base_url = st.sidebar.text_input(
-    "Nemotron API Base URL", 
-    value=default_base_url,
-    help="URL endpoint for your hosted vLLM or NVIDIA NIM server running nvidia/nemotron-3-nano-omni-30b-a3b-reasoning."
-)
-
-nemotron_api_key = st.sidebar.text_input(
-    "LLM API Key (e.g., NVIDIA NIM Key)", 
-    value=default_api_key, 
-    type="password",
-    help="Enter your API key or configure it in .streamlit/secrets.toml."
-)
 
 user_prompt = st.sidebar.text_area(
     "Custom AI Prompt Instructions:",
@@ -160,9 +143,12 @@ def phase1_transcript_check(video_id, keyword):
             return None
     return matches
 
-def analyze_with_nemotron_vlm(user_prompt, context_text, base_url, api_key):
+def analyze_with_nemotron_vlm(user_prompt, context_text):
     """Sends transcript context to nvidia/nemotron-3-nano-omni-30b-a3b-reasoning with thinking mode enabled."""
     try:
+        base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
+        api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
+        
         client = OpenAI(base_url=base_url, api_key=api_key)
         
         messages_content = [
@@ -205,7 +191,7 @@ def generate_pdf_report(results_data, filename="Transcript_Analysis_Report.pdf")
         spaceAfter=12
     )
     
-    story.append(Paragraph("🚗 Automotive Video Transcript Analysis Report", title_style))
+    story.append(Paragraph("🚗 Automotive Video Transcript Analysis Report — By Ibraheem", title_style))
     story.append(Paragraph("Generated via Transcript-Only Nemotron VLM Pipeline", styles['Normal']))
     story.append(Spacer(1, 15))
 
@@ -267,9 +253,7 @@ if run_button:
                         
                         ai_analysis = analyze_with_nemotron_vlm(
                             user_prompt=user_prompt, 
-                            context_text=match['text'], 
-                            base_url=nemotron_base_url,
-                            api_key=nemotron_api_key
+                            context_text=match['text']
                         )
                         
                         all_results.append({
