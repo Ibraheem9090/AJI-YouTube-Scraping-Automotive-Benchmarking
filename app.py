@@ -16,7 +16,6 @@ ensure_packages()
 
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
-import yt_dlp
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
@@ -26,58 +25,91 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI YouTube Car Part Analyzer", layout="wide")
 
 st.title("🚗 AI Automotive Video & Part Analyzer — By Ibraheem")
-st.markdown("Automated multi-video transcript benchmarking pipeline powered by robust multi-strategy extraction, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
+st.markdown("Automated multi-video transcript benchmarking pipeline powered by **Playwright UI Transcript Scraping**, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
 tab_run, tab_studio = st.tabs(["🚀 Run Benchmarking Pipeline", "🛠️ LfD Workflow Studio (Schema Inspector)"])
 
-def parse_vtt_file(filepath):
+def scrape_transcript_via_playwright(page):
     segments = []
-    if not os.path.exists(filepath):
-        return segments
-    
     try:
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
+        # Scroll down slightly to ensure transcript button is in viewport
+        page.mouse.wheel(0, 400)
+        page.wait_for_timeout(1500)
 
-        blocks = content.split('\n\n')
-        for block in blocks:
-            lines = block.strip().split('\n')
-            time_line_idx = -1
-            for idx, line in enumerate(lines):
-                if '-->' in line:
-                    time_line_idx = idx
+        # Click "Show transcript" button
+        clicked = False
+        for selector in [
+            "button:has-text('Show transcript')",
+            "text=Show transcript",
+            "ytd-button-renderer:has-text('Transcript')",
+            "button[aria-label*='Show transcript' i]"
+        ]:
+            try:
+                btn = page.locator(selector).first
+                if btn.is_visible(timeout=3000):
+                    btn.click()
+                    clicked = True
                     break
-            
-            if time_line_idx != -1:
-                time_line = lines[time_line_idx]
-                parts = time_line.split('-->')
-                start_str = parts[0].strip().split()[0]
+            except Exception:
+                continue
+
+        if not clicked:
+            # Fallback JavaScript click
+            clicked = page.evaluate("""() => {
+                const buttons = Array.from(document.querySelectorAll('button, yt-formatted-string, span, div'));
+                const target = buttons.find(b => b.innerText && b.innerText.trim().toLowerCase() === 'show transcript');
+                if (target) {
+                    target.click();
+                    return true;
+                }
+                return false;
+            }""")
+
+        if not clicked:
+            return []
+
+        # Wait for transcript panel and segments to load
+        page.wait_for_timeout(4000)
+
+        # Extract segments via Deep Shadow DOM traversal
+        segments = page.evaluate("""() => {
+            function querySelectorAllDeep(selector, root = document) {
+                let results = Array.from(root.querySelectorAll(selector));
+                const allElements = root.querySelectorAll('*');
+                for (const el of allElements) {
+                    if (el.shadowRoot) {
+                        results.push(...querySelectorAllDeep(selector, el.shadowRoot));
+                    }
+                }
+                return results;
+            }
+
+            const items = querySelectorAllDeep('ytd-transcript-segment-renderer');
+            return items.map(seg => {
+                const timeEl = seg.querySelector('.segment-timestamp') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
+                const textEl = seg.querySelector('.segment-text') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
                 
-                t_parts = start_str.replace(',', '.').split(':')
-                start_sec = 0.0
-                if len(t_parts) == 3:
-                    start_sec = float(t_parts[0]) * 3600 + float(t_parts[1]) * 60 + float(t_parts[2])
-                elif len(t_parts) == 2:
-                    start_sec = float(t_parts[0]) * 60 + float(t_parts[1])
-                
-                text_lines = lines[time_line_idx + 1:]
-                text = " ".join(text_lines).strip()
-                text = re.sub(r'<[^>]+>', '', text)
-                text = re.sub(r'\{[^}]+\}', '', text)
-                
-                if text:
-                    mins = int(start_sec // 60)
-                    secs = int(start_sec % 60)
-                    segments.append({
-                        'start_sec': start_sec,
-                        'timestamp': f"{mins}:{secs:02d}",
-                        'text': text
-                    })
+                const timeStr = timeEl ? timeEl.innerText.trim() : "0:00";
+                const parts = timeStr.split(':');
+                let sec = 0;
+                if (parts.length === 2) {
+                    sec = parseInt(parts[0]) * 60 + parseInt(parts[1]);
+                } else if (parts.length === 3) {
+                    sec = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
+                }
+
+                return {
+                    start_sec: sec,
+                    timestamp: timeStr,
+                    text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
+                };
+            });
+        }""")
     except Exception as e:
-        print(f"VTT parse error: {e}")
-        
+        print(f"Playwright scraping error: {e}")
+
     return segments
 
 with tab_run:
@@ -169,114 +201,24 @@ with tab_run:
                             continue
 
                         if idx > 0:
-                            time.sleep(3)
+                            time.sleep(2)
 
-                        segments = []
-                        st.write(f"📖 Attempting yt-dlp subtitle download for video ID: {video_id}")
-                        sub_file_prefix = f"sub_{video_id}"
-                        vtt_filename = f"{sub_file_prefix}.en.vtt"
-                        
-                        ydl_opts = {
-                            'writeautomaticsub': True,
-                            'subtitleslangs': ['en'],
-                            'subtitlesformat': 'vtt',
-                            'skip_download': True,
-                            'outtmpl': sub_file_prefix,
-                            'quiet': True,
-                            'no_warnings': True,
-                            'extractor_args': {
-                                'youtube': {
-                                    'player_client': ['android', 'web']
-                                }
-                            }
-                        }
-                        
+                        st.write(f"🌐 Opening video page: {v_url}")
+                        page.goto(v_url, timeout=30000)
+                        page.wait_for_load_state("domcontentloaded")
+                        page.wait_for_timeout(2500)
+
+                        # Dismiss consent overlays if present
                         try:
-                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                                ydl.download([v_url])
-                        except Exception as ydl_err:
-                            st.write(f"yt-dlp notice for {video_id}: {ydl_err}")
+                            page.locator("button[aria-label*='Accept all' i]").click(timeout=2000)
+                        except Exception:
+                            pass
 
-                        segments = parse_vtt_file(vtt_filename)
-                        if os.path.exists(vtt_filename):
-                            try:
-                                os.remove(vtt_filename)
-                            except Exception:
-                                pass
-
-                        # Fallback to Playwright DOM scraping if yt-dlp returned 0 segments (e.g. due to 429)
-                        if not segments:
-                            st.write(f"🔄 Fallback: Extracting transcript via Playwright DOM for {video_id}...")
-                            try:
-                                page.goto(v_url, timeout=30000)
-                                page.wait_for_load_state("domcontentloaded")
-                                page.wait_for_timeout(2500)
-
-                                # Expand description
-                                try:
-                                    page.evaluate("""() => {
-                                        const exp = document.querySelector('tp-yt-paper-button#expand, button#expand, #description-inline-expander');
-                                        if (exp) exp.click();
-                                    }""")
-                                    page.wait_for_timeout(1000)
-                                except Exception:
-                                    pass
-
-                                # Click transcript button
-                                for sel in [
-                                    "button[aria-label*='Show transcript' i]", 
-                                    "button:has-text('Show transcript')", 
-                                    "text=Show transcript",
-                                    "ytd-button-renderer:has-text('Transcript')"
-                                ]:
-                                    try:
-                                        page.click(sel, timeout=2000)
-                                        break
-                                    except Exception:
-                                        continue
-
-                                page.wait_for_timeout(3000)
-
-                                dom_segments = page.evaluate("""() => {
-                                    function querySelectorAllDeep(selector, root = document) {
-                                        let results = Array.from(root.querySelectorAll(selector));
-                                        const allElements = root.querySelectorAll('*');
-                                        for (const el of allElements) {
-                                            if (el.shadowRoot) {
-                                                results.push(...querySelectorAllDeep(selector, el.shadowRoot));
-                                            }
-                                        }
-                                        return results;
-                                    }
-
-                                    const items = querySelectorAllDeep('ytd-transcript-segment-renderer');
-                                    return items.map(seg => {
-                                        const timeEl = seg.querySelector('.segment-timestamp') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
-                                        const textEl = seg.querySelector('.segment-text') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
-                                        
-                                        const timeStr = timeEl ? timeEl.innerText.trim() : "0:00";
-                                        const parts = timeStr.split(':');
-                                        let sec = 0;
-                                        if (parts.length === 2) {
-                                            sec = parseInt(parts[0]) * 60 + parseInt(parts[1]);
-                                        } else if (parts.length === 3) {
-                                            sec = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
-                                        }
-
-                                        return {
-                                            start_sec: sec,
-                                            timestamp: timeStr,
-                                            text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
-                                        };
-                                    });
-                                }""")
-                                if dom_segments:
-                                    segments = dom_segments
-                            except Exception as fallback_err:
-                                st.write(f"DOM fallback note: {fallback_err}")
+                        st.write(f"📖 Scraping transcript via Playwright UI for video ID: {video_id}")
+                        segments = scrape_transcript_via_playwright(page)
 
                         if not segments:
-                            st.warning(f"Could not retrieve transcript segments for {video_id} via any method.")
+                            st.warning(f"Could not retrieve transcript segments for {video_id}.")
                             continue
 
                         st.write(f"📊 Retrieved {len(segments)} transcript segments for {video_id}. Scanning for keyword matches...")
@@ -311,11 +253,6 @@ with tab_run:
                             page.goto(seek_url, timeout=30000)
                             page.wait_for_load_state("domcontentloaded")
                             page.wait_for_timeout(4000)
-
-                            try:
-                                page.locator("button[aria-label*='Accept all' i]").click(timeout=2000)
-                            except Exception:
-                                pass
 
                             screenshot_path = f"screenshot_{video_id}_{int(match_seg['start_sec'])}.png"
                             try:
