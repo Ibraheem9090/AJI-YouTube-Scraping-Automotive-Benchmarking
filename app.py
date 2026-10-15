@@ -4,16 +4,18 @@ import subprocess
 import streamlit as st
 
 @st.cache_resource
-def ensure_playwright_installed():
+def ensure_packages():
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True)
     except Exception as e:
         st.warning(f"Browser binary setup note: {e}")
 
-ensure_playwright_installed()
+ensure_packages()
 
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
+import yt_dlp
+import requests
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
@@ -23,7 +25,7 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI YouTube Car Part Analyzer", layout="wide")
 
 st.title("🚗 AI Automotive Video & Part Analyzer — By Ibraheem")
-st.markdown("Automated multi-video transcript benchmarking pipeline, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
+st.markdown("Automated multi-video transcript benchmarking pipeline powered by **yt-dlp subtitle extraction**, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
@@ -115,117 +117,46 @@ with tab_run:
                         except Exception:
                             continue
 
-                        st.write(f"🌐 Opening video page: {v_url}")
-                        page.goto(v_url, timeout=30000)
-                        page.wait_for_load_state("domcontentloaded")
-                        page.wait_for_timeout(3000)
-
-                        # Dismiss consent overlays if present
-                        try:
-                            consent_btn = page.locator("button[aria-label*='Accept all' i], ytd-button-renderer:has-text('Accept all')").first
-                            if consent_btn.is_visible(timeout=2000):
-                                consent_btn.click()
-                        except Exception:
-                            pass
-
-                        # Expand description (...more)
-                        st.write("🔍 Expanding video description (...more)...")
-                        try:
-                            page.evaluate("""() => {
-                                const exp = document.querySelector('tp-yt-paper-button#expand, button#expand, #description-inline-expander');
-                                if (exp) exp.click();
-                            }""")
-                            page.wait_for_timeout(1500)
-                        except Exception:
-                            pass
-
-                        # Open transcript panel via robust multi-step UI interaction
-                        st.write("📂 Opening transcript panel...")
-                        transcript_opened = False
+                        st.write(f"📖 Extracting subtitles via yt-dlp for video ID: {video_id}")
+                        segments = []
+                        ydl_opts = {
+                            'skip_download': True,
+                            'writeautomaticsub': True,
+                            'subtitleslangs': ['en'],
+                            'quiet': True,
+                            'no_warnings': True,
+                        }
                         
-                        # Attempt 1: Direct button selectors
-                        for sel in [
-                            "button[aria-label*='Show transcript' i]", 
-                            "button:has-text('Show transcript')", 
-                            "text=Show transcript",
-                            "ytd-button-renderer:has-text('Transcript')"
-                        ]:
-                            try:
-                                page.click(sel, timeout=3000)
-                                transcript_opened = True
-                                break
-                            except Exception:
-                                continue
-
-                        # Attempt 2: Click video action overflow menu '...' and select transcript
-                        if not transcript_opened:
-                            try:
-                                more_actions_btn = page.locator("ytd-menu-renderer button, button[aria-label*='More actions']").first
-                                if more_actions_btn.is_visible(timeout=2000):
-                                    more_actions_btn.click()
-                                    page.wait_for_timeout(1000)
-                                    page.locator("tp-yt-paper-item:has-text('Transcript'), ytd-menu-service-item-renderer:has-text('Transcript')").click(timeout=3000)
-                                    transcript_opened = True
-                            except Exception:
-                                pass
-
-                        # Attempt 3: JavaScript fallback click
-                        if not transcript_opened:
-                            try:
-                                transcript_opened = page.evaluate("""() => {
-                                    const allEls = Array.from(document.querySelectorAll('button, yt-formatted-string, tp-yt-paper-item, ytd-button-renderer'));
-                                    const target = allEls.find(el => el.innerText && el.innerText.toLowerCase().includes('transcript'));
-                                    if (target) {
-                                        target.click();
-                                        return true;
-                                    }
-                                    return false;
-                                }""")
-                                page.wait_for_timeout(2000)
-                            except Exception:
-                                pass
-
-                        if not transcript_opened:
-                            st.warning(f"Could not open transcript panel for {video_id}.")
-                            continue
-
-                        # Extract segments from active DOM transcript panel using Deep Shadow DOM traversal
-                        st.write("⏳ Waiting for transcript DOM segments to render...")
-                        page.wait_for_timeout(4000)
-
-                        segments = page.evaluate("""() => {
-                            function querySelectorAllDeep(selector, root = document) {
-                                let results = Array.from(root.querySelectorAll(selector));
-                                const allElements = root.querySelectorAll('*');
-                                for (const el of allElements) {
-                                    if (el.shadowRoot) {
-                                        results.push(...querySelectorAllDeep(selector, el.shadowRoot));
-                                    }
-                                }
-                                return results;
-                            }
-
-                            const segments = querySelectorAllDeep('ytd-transcript-segment-renderer');
-                            return segments.map(seg => {
-                                const timeEl = seg.querySelector('.segment-timestamp') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
-                                const textEl = seg.querySelector('.segment-text') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
+                        try:
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                info = ydl.extract_info(v_url, download=False)
+                                auto_caps = info.get('automatic_captions', {})
+                                manual_caps = info.get('subtitles', {})
+                                en_caps = auto_caps.get('en') or manual_caps.get('en')
                                 
-                                const timeStr = timeEl ? timeEl.innerText.trim() : "0:00";
-                                const parts = timeStr.split(':');
-                                let sec = 0;
-                                if (parts.length === 2) {
-                                    sec = parseInt(parts[0]) * 60 + parseInt(parts[1]);
-                                } else if (parts.length === 3) {
-                                    sec = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
-                                }
-
-                                return {
-                                    start_sec: sec,
-                                    timestamp: timeStr,
-                                    text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
-                                };
-                            });
-                        }""")
+                                if en_caps:
+                                    target_format = next((cap for cap in en_caps if cap['ext'] == 'json3'), None)
+                                    if not target_format:
+                                        target_format = next((cap for cap in en_caps if cap['ext'] == 'vtt'), None)
+                                    
+                                    if target_format:
+                                        resp = requests.get(target_format['url'], timeout=15)
+                                        if target_format['ext'] == 'json3':
+                                            data = resp.json()
+                                            for event in data.get('events', []):
+                                                if 'segs' in event and 'tStartMs' in event:
+                                                    start_sec = event['tStartMs'] / 1000.0
+                                                    text = "".join([seg.get('utf8', '') for seg in event['segs']]).strip()
+                                                    if text and text != '\n':
+                                                        mins = int(start_sec // 60)
+                                                        secs = int(start_sec % 60)
+                                                        segments.append({
+                                                            'start_sec': start_sec,
+                                                            'timestamp': f"{mins}:{secs:02d}",
+                                                            'text': text
+                                                        })
+                        except Exception as ydl_err:
+                            st.warning(f"yt-dlp extraction error for {video_id}: {ydl_err}")
 
                         if not segments:
                             st.warning(f"Could not retrieve transcript segments for {video_id}.")
@@ -250,11 +181,17 @@ with tab_run:
                         for m_idx in matched_indices:
                             match_seg = segments[m_idx]
                             seek_url = f"https://www.youtube.com/watch?v={video_id}&t={int(match_seg['start_sec'])}s"
-                            st.write(f"🌐 Seeking player to timestamp {match_seg['timestamp']}: {seek_url}")
+                            st.write(f"🌐 Opening video player at timestamp {match_seg['timestamp']}: {seek_url}")
                             
                             page.goto(seek_url, timeout=30000)
                             page.wait_for_load_state("domcontentloaded")
-                            page.wait_for_timeout(4000) # Allow player to render video frame
+                            page.wait_for_timeout(4000)
+
+                            # Dismiss consent overlays if present
+                            try:
+                                page.locator("button[aria-label*='Accept all' i]").click(timeout=2000)
+                            except Exception:
+                                pass
 
                             # Capture clean viewport screenshot
                             screenshot_path = f"screenshot_{video_id}_{int(match_seg['start_sec'])}.png"
@@ -343,8 +280,8 @@ with tab_studio:
     st.markdown("Inspect your recorded LfD workflow JSON schema stored in Git.")
 
     if os.path.exists(WORKFLOW_FILE):
-        with open(WORKFLOW_FILE, "r") as f:
-            current_json_str = f.read()
+        with open(WORKFLOW_FILE, "r") as fn:
+            current_json_str = fn.read()
     else:
         current_json_str = "{}"
 
