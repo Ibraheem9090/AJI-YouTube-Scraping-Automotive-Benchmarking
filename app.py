@@ -122,23 +122,22 @@ with tab_run:
 
                             st.write(f"📖 Fetching transcript via API for video ID: {video_id}")
                             try:
-                                # Updated to use instance fetch method matching youtube-transcript-api v0.6+
                                 raw_transcript = YouTubeTranscriptApi().fetch(video_id)
                             except Exception as api_err:
                                 st.warning(f"Could not fetch transcript for {video_id}: {api_err}")
                                 continue
 
-                            # Format transcript segments
+                            # Format transcript segments using object attributes (.start and .text)
                             segments = []
                             for entry in raw_transcript:
-                                start_sec = entry['start']
+                                start_sec = entry.start
                                 minutes = int(start_sec // 60)
                                 seconds = int(start_sec % 60)
                                 timestamp_str = f"{minutes}:{seconds:02d}"
                                 segments.append({
                                     'start_sec': start_sec,
                                     'timestamp': timestamp_str,
-                                    'text': entry['text']
+                                    'text': entry.text
                                 })
 
                             st.write(f"📊 Retrieved {len(segments)} transcript entries. Searching for keyword tokens: {keyword_tokens}")
