@@ -26,7 +26,7 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI YouTube Car Part Analyzer", layout="wide")
 
 st.title("🚗 AI Automotive Video & Part Analyzer — By Ibraheem")
-st.markdown("Automated multi-video transcript benchmarking pipeline powered by **yt-dlp VTT subtitle parsing**, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
+st.markdown("Automated multi-video transcript benchmarking pipeline powered by robust multi-strategy extraction, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
@@ -168,11 +168,11 @@ with tab_run:
                         except Exception:
                             continue
 
-                        # Polite delay between requests to avoid HTTP 429 rate limits
                         if idx > 0:
                             time.sleep(3)
 
-                        st.write(f"📖 Downloading auto-subtitles via yt-dlp for video ID: {video_id}")
+                        segments = []
+                        st.write(f"📖 Attempting yt-dlp subtitle download for video ID: {video_id}")
                         sub_file_prefix = f"sub_{video_id}"
                         vtt_filename = f"{sub_file_prefix}.en.vtt"
                         
@@ -184,29 +184,103 @@ with tab_run:
                             'outtmpl': sub_file_prefix,
                             'quiet': True,
                             'no_warnings': True,
+                            'extractor_args': {
+                                'youtube': {
+                                    'player_client': ['android', 'web']
+                                }
+                            }
                         }
                         
                         try:
                             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                                 ydl.download([v_url])
                         except Exception as ydl_err:
-                            st.warning(f"yt-dlp download note for {video_id}: {ydl_err}")
+                            st.write(f"yt-dlp notice for {video_id}: {ydl_err}")
 
                         segments = parse_vtt_file(vtt_filename)
-                        
                         if os.path.exists(vtt_filename):
                             try:
                                 os.remove(vtt_filename)
                             except Exception:
                                 pass
 
+                        # Fallback to Playwright DOM scraping if yt-dlp returned 0 segments (e.g. due to 429)
                         if not segments:
-                            st.warning(f"Could not retrieve transcript segments for {video_id}.")
+                            st.write(f"🔄 Fallback: Extracting transcript via Playwright DOM for {video_id}...")
+                            try:
+                                page.goto(v_url, timeout=30000)
+                                page.wait_for_load_state("domcontentloaded")
+                                page.wait_for_timeout(2500)
+
+                                # Expand description
+                                try:
+                                    page.evaluate("""() => {
+                                        const exp = document.querySelector('tp-yt-paper-button#expand, button#expand, #description-inline-expander');
+                                        if (exp) exp.click();
+                                    }""")
+                                    page.wait_for_timeout(1000)
+                                except Exception:
+                                    pass
+
+                                # Click transcript button
+                                for sel in [
+                                    "button[aria-label*='Show transcript' i]", 
+                                    "button:has-text('Show transcript')", 
+                                    "text=Show transcript",
+                                    "ytd-button-renderer:has-text('Transcript')"
+                                ]:
+                                    try:
+                                        page.click(sel, timeout=2000)
+                                        break
+                                    except Exception:
+                                        continue
+
+                                page.wait_for_timeout(3000)
+
+                                dom_segments = page.evaluate("""() => {
+                                    function querySelectorAllDeep(selector, root = document) {
+                                        let results = Array.from(root.querySelectorAll(selector));
+                                        const allElements = root.querySelectorAll('*');
+                                        for (const el of allElements) {
+                                            if (el.shadowRoot) {
+                                                results.push(...querySelectorAllDeep(selector, el.shadowRoot));
+                                            }
+                                        }
+                                        return results;
+                                    }
+
+                                    const items = querySelectorAllDeep('ytd-transcript-segment-renderer');
+                                    return items.map(seg => {
+                                        const timeEl = seg.querySelector('.segment-timestamp') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
+                                        const textEl = seg.querySelector('.segment-text') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
+                                        
+                                        const timeStr = timeEl ? timeEl.innerText.trim() : "0:00";
+                                        const parts = timeStr.split(':');
+                                        let sec = 0;
+                                        if (parts.length === 2) {
+                                            sec = parseInt(parts[0]) * 60 + parseInt(parts[1]);
+                                        } else if (parts.length === 3) {
+                                            sec = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
+                                        }
+
+                                        return {
+                                            start_sec: sec,
+                                            timestamp: timeStr,
+                                            text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
+                                        };
+                                    });
+                                }""")
+                                if dom_segments:
+                                    segments = dom_segments
+                            except Exception as fallback_err:
+                                st.write(f"DOM fallback note: {fallback_err}")
+
+                        if not segments:
+                            st.warning(f"Could not retrieve transcript segments for {video_id} via any method.")
                             continue
 
                         st.write(f"📊 Retrieved {len(segments)} transcript segments for {video_id}. Scanning for keyword matches...")
 
-                        # Flexible matching: checks phrase substring or presence of main tokens
                         matched_indices = []
                         i = 0
                         while i < len(segments):
