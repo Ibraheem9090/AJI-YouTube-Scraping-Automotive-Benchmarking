@@ -34,46 +34,67 @@ tab_run, tab_studio = st.tabs(["🚀 Run Benchmarking Pipeline", "🛠️ LfD Wo
 def scrape_transcript_via_playwright(page):
     segments = []
     try:
-        # Scroll down slightly to ensure transcript button is in viewport
-        page.mouse.wheel(0, 400)
-        page.wait_for_timeout(1500)
+        # 1. Scroll down to bring description and transcript button into view
+        page.evaluate("window.scrollBy(0, 500);")
+        page.wait_for_timeout(2000)
 
-        # Click "Show transcript" button
-        clicked = False
-        for selector in [
-            "button:has-text('Show transcript')",
-            "text=Show transcript",
-            "ytd-button-renderer:has-text('Transcript')",
-            "button[aria-label*='Show transcript' i]"
-        ]:
-            try:
-                btn = page.locator(selector).first
-                if btn.is_visible(timeout=3000):
-                    btn.click()
-                    clicked = True
-                    break
-            except Exception:
-                continue
+        # 2. Try expanding description if "Show transcript" is hidden inside
+        try:
+            page.evaluate("""() => {
+                const expandBtn = document.querySelector('#expand, tp-yt-paper-button#expand, #description-inline-expander');
+                if (expandBtn) expandBtn.click();
+            }""")
+            page.wait_for_timeout(1000)
+        except Exception:
+            pass
 
-        if not clicked:
-            # Fallback JavaScript click
-            clicked = page.evaluate("""() => {
-                const buttons = Array.from(document.querySelectorAll('button, yt-formatted-string, span, div'));
-                const target = buttons.find(b => b.innerText && b.innerText.trim().toLowerCase() === 'show transcript');
-                if (target) {
-                    target.click();
-                    return true;
+        # 3. Click "Show transcript" via robust deep shadow DOM traversal
+        clicked = page.evaluate("""() => {
+            function findAndClick(root) {
+                const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
+                let node;
+                while (node = walker.nextNode()) {
+                    if (node.shadowRoot) {
+                        if (findAndClick(node.shadowRoot)) return true;
+                    }
+                    const text = node.innerText || node.textContent || '';
+                    if (text.trim().toLowerCase() === 'show transcript' || text.trim().toLowerCase() === 'transcript') {
+                        const rect = node.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            node.click();
+                            return true;
+                        }
+                    }
                 }
                 return false;
-            }""")
+            }
+            return findAndClick(document);
+        }""")
+
+        if not clicked:
+            # Fallback Playwright locators
+            for selector in [
+                "button:has-text('Show transcript')",
+                "text=Show transcript",
+                "ytd-button-renderer:has-text('Transcript')",
+                "button[aria-label*='Show transcript' i]"
+            ]:
+                try:
+                    btn = page.locator(selector).first
+                    if btn.is_visible(timeout=2000):
+                        btn.click()
+                        clicked = True
+                        break
+                except Exception:
+                    continue
 
         if not clicked:
             return []
 
-        # Wait for transcript panel and segments to load
+        # 4. Wait for transcript panel to render
         page.wait_for_timeout(4000)
 
-        # Extract segments via Deep Shadow DOM traversal
+        # 5. Extract segments via Deep Shadow DOM traversal
         segments = page.evaluate("""() => {
             function querySelectorAllDeep(selector, root = document) {
                 let results = Array.from(root.querySelectorAll(selector));
