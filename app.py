@@ -115,7 +115,6 @@ with tab_run:
                         keyword_tokens = [t.lower() for t in search_keyword.split()]
 
                         for v_url in video_urls[:max_videos]:
-                            # Extract video ID (e.g. https://www.youtube.com/watch?v=XYZ -> XYZ)
                             try:
                                 video_id = v_url.split("v=")[1].split("&")[0]
                             except Exception:
@@ -123,7 +122,8 @@ with tab_run:
 
                             st.write(f"📖 Fetching transcript via API for video ID: {video_id}")
                             try:
-                                raw_transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                                # Updated to use instance fetch method matching youtube-transcript-api v0.6+
+                                raw_transcript = YouTubeTranscriptApi().fetch(video_id)
                             except Exception as api_err:
                                 st.warning(f"Could not fetch transcript for {video_id}: {api_err}")
                                 continue
@@ -160,7 +160,7 @@ with tab_run:
                                 st.write(f"🌐 Opening video player at timestamp: {seek_url}")
                                 page.goto(seek_url, timeout=30000)
                                 page.wait_for_load_state("domcontentloaded")
-                                page.wait_for_timeout(3500) # Wait for player to seek and render frame
+                                page.wait_for_timeout(3500)
 
                                 # Dismiss cookie/consent dialogs if blocking view
                                 try:
@@ -185,6 +185,7 @@ with tab_run:
                                     'ocr_text': window_text.replace('\n', ' '),
                                     'screenshot': screenshot_path
                                 })
+                                break
                             else:
                                 st.write("⚠️ Keyword not found in this video's transcript.")
 
