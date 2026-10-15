@@ -1,6 +1,7 @@
 import os
 import json
 import subprocess
+import base64
 import streamlit as st
 
 @st.cache_resource
@@ -16,14 +17,14 @@ from playwright.sync_api import sync_playwright
 from openai import OpenAI
 
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 
 st.set_page_config(page_title="AI YouTube Car Part Analyzer (LfD Studio)", layout="wide")
 
 st.title("🚗 AI Automotive Video & Part Analyzer (LfD Studio) — By Ibraheem")
-st.markdown("Declarative LfD pipeline driven by your recorded browser demonstration, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports.")
+st.markdown("Declarative LfD pipeline driven by your recorded browser demonstration, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with video screenshots.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
@@ -173,14 +174,16 @@ with tab_run:
                                 except Exception as e:
                                     st.write(f"❌ Failed JS fallback: {e}")
 
-                            # Extract segments using recursive Shadow DOM traversal
+                            # Extract segments from active YouTube engagement panel
                             if transcript_opened:
                                 st.write("⏳ Waiting for transcript API segments to load...")
-                                page.wait_for_timeout(5000)  # Allow YouTube backend to populate DOM segments
+                                page.wait_for_timeout(5000)
 
-                                st.write("🔎 Extracting transcript segments via Deep Shadow DOM traversal...")
+                                st.write("🔎 Extracting transcript segments from active YouTube engagement panel...")
                                 segment_data = page.evaluate("""() => {
-                                    function querySelectorAllDeep(selector, root = document) {
+                                    const panel = document.querySelector('ytd-engagement-panel-section-list-renderer[visibility="VISIBLE"]') || document;
+                                    
+                                    function querySelectorAllDeep(selector, root = panel) {
                                         let results = Array.from(root.querySelectorAll(selector));
                                         const allElements = root.querySelectorAll('*');
                                         for (const el of allElements) {
@@ -193,34 +196,61 @@ with tab_run:
 
                                     let segments = querySelectorAllDeep('ytd-transcript-segment-renderer');
                                     if (segments.length === 0) {
-                                        segments = querySelectorAllDeep('.segment-rendered, [class*="transcript-segment"]');
+                                        segments = querySelectorAllDeep('.segment-rendered, [class*="transcript-segment"], yt-formatted-string.segment-text');
                                     }
                                     
-                                    return segments.map(seg => {
+                                    return segments.map((seg, index) => {
                                         const timeEl = seg.querySelector('.segment-timestamp, [class*="timestamp"]') || 
                                                        (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
                                         const textEl = seg.querySelector('.segment-text, [class*="text"]') || 
                                                        (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
                                         
                                         return {
+                                            index: index,
                                             timestamp: timeEl ? timeEl.innerText.trim() : "0:00",
                                             text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
                                         };
                                     });
                                 }""")
 
-                                st.write(f"📊 Extracted {len(segment_data)} transcript segment(s) via Shadow DOM traversal.")
+                                st.write(f"📊 Extracted {len(segment_data)} transcript segment(s) from panel.")
 
                                 for i in range(len(segment_data)):
                                     window_text = " ".join([segment_data[j]['text'] for j in range(i, min(i + 3, len(segment_data)))])
                                     window_lower = window_text.lower()
                                     if keyword_tokens and all(tok in window_lower for tok in keyword_tokens):
+                                        st.write(f"✨ Match found at timestamp {segment_data[i]['timestamp']}! Clicking timestamp segment...")
+                                        
+                                        # Click the timestamp row to seek the video player to this timestamp
+                                        try:
+                                            page.evaluate(f"""(idx) => {{
+                                                const panel = document.querySelector('ytd-engagement-panel-section-list-renderer[visibility="VISIBLE"]') || document;
+                                                const segments = panel.querySelectorAll('ytd-transcript-segment-renderer');
+                                                if (segments[idx]) {{
+                                                    segments[idx].click();
+                                                }}
+                                            }}""", i)
+                                            page.wait_for_timeout(2500) # Allow video player to render the frame
+                                        except Exception as click_err:
+                                            st.write(f"Note on timestamp click: {click_err}")
+
+                                        # Capture video element screenshot
+                                        screenshot_path = f"screenshot_match_{len(all_matches)}.png"
+                                        try:
+                                            player = page.locator("video, #movie_player").first
+                                            player.screenshot(path=screenshot_path)
+                                            st.write(f"📸 Captured video frame screenshot at {segment_data[i]['timestamp']}!")
+                                        except Exception:
+                                            # Fallback: capture full browser page screenshot
+                                            page.screenshot(path=screenshot_path)
+                                            st.write(f"📸 Captured page screenshot at {segment_data[i]['timestamp']}!")
+
                                         all_matches.append({
                                             'title': page.title(),
                                             'timestamp': segment_data[i]['timestamp'],
-                                            'ocr_text': window_text.replace('\n', ' ')
+                                            'ocr_text': window_text.replace('\n', ' '),
+                                            'screenshot': screenshot_path
                                         })
-                                        st.write(f"✨ Match found at timestamp {segment_data[i]['timestamp']}!")
                                         break
                             else:
                                 st.write("❌ Could not open transcript panel.")
@@ -256,23 +286,32 @@ with tab_run:
 
                         all_results.append({**match, 'analysis': analysis_text})
 
+                    # Compile PDF Report with Embedded Screenshots
                     doc = SimpleDocTemplate("Transcript_Analysis_Report.pdf", pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
                     styles = getSampleStyleSheet()
                     story = [
                         Paragraph("🚗 Automotive Video Transcript Analysis Report — By Ibraheem", styles['Heading1']),
                         Spacer(1, 15)
                     ]
-                    table_data = [[Paragraph("<b>Video</b>", styles['Normal']), Paragraph("<b>Time</b>", styles['Normal']), Paragraph("<b>Text</b>", styles['Normal']), Paragraph("<b>Analysis</b>", styles['Normal'])]]
-                    for item in all_results:
-                        table_data.append([Paragraph(item['title'], styles['Normal']), Paragraph(item['timestamp'], styles['Normal']), Paragraph(item['ocr_text'], styles['Normal']), Paragraph(item['analysis'], styles['Normal'])])
                     
-                    t = Table(table_data, colWidths=[130, 70, 140, 200])
-                    t.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")), ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#E2E8F0"))]))
-                    story.append(t)
+                    for idx, item in enumerate(all_results, 1):
+                        story.append(Paragraph(f"<b>Match {idx}: {item['title']}</b>", styles['Heading2']))
+                        story.append(Paragraph(f"<b>Timestamp:</b> {item['timestamp']}", styles['Normal']))
+                        story.append(Paragraph(f"<b>Context:</b> {item['ocr_text']}", styles['Normal']))
+                        story.append(Spacer(1, 8))
+                        
+                        if os.path.exists(item['screenshot']):
+                            story.append(RLImage(item['screenshot'], width=380, height=215))
+                            story.append(Spacer(1, 10))
+
+                        story.append(Paragraph("<b>AI Analysis:</b>", styles['Heading3']))
+                        story.append(Paragraph(item['analysis'], styles['Normal']))
+                        story.append(Spacer(1, 20))
+
                     doc.build(story)
 
                     with open("Transcript_Analysis_Report.pdf", "rb") as f:
-                        st.download_button("📥 Download Structured PDF Report", f, file_name="LfD_Report.pdf", mime="application/pdf")
+                        st.download_button("📥 Download Structured PDF Report (With Screenshots)", f, file_name="LfD_Report.pdf", mime="application/pdf")
                 else:
                     status_box.update(label="⚠️ Execution finished, but no matching segments were captured.", state="error", expanded=True)
                     st.warning("Check the live status box above to verify video URL extraction.")
