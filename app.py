@@ -173,37 +173,40 @@ with tab_run:
                                 except Exception as e:
                                     st.write(f"❌ Failed JS fallback: {e}")
 
-                            # Extract segments with proper async wait time
+                            # Extract segments using bulletproof JavaScript DOM evaluation
                             if transcript_opened:
                                 st.write("⏳ Waiting for transcript API segments to load...")
                                 page.wait_for_timeout(4000)  # Allow YouTube backend to populate DOM segments
 
-                                try:
-                                    page.wait_for_selector("ytd-transcript-segment-renderer", timeout=10000)
-                                except Exception:
-                                    pass
+                                st.write("🔎 Extracting transcript segments via JS DOM evaluation...")
+                                segment_data = page.evaluate("""() => {
+                                    let segments = Array.from(document.querySelectorAll('ytd-transcript-segment-renderer'));
+                                    if (segments.length === 0) {
+                                        segments = Array.from(document.querySelectorAll('.segment-rendered, [class*="transcript-segment"]'));
+                                    }
+                                    
+                                    return segments.map(seg => {
+                                        const timeEl = seg.querySelector('.segment-timestamp, [class*="timestamp"]');
+                                        const textEl = seg.querySelector('.segment-text, [class*="text"]');
+                                        return {
+                                            timestamp: timeEl ? timeEl.innerText.trim() : "0:00",
+                                            text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
+                                        };
+                                    });
+                                }""")
 
-                                segments = page.locator("ytd-transcript-segment-renderer").all()
-                                st.write(f"📊 Extracted {len(segments)} segment renderer(s).")
+                                st.write(f"📊 Extracted {len(segment_data)} transcript segment(s) via JS.")
 
-                                seg_texts, seg_times = [], []
-                                for seg in segments:
-                                    try:
-                                        seg_times.append(seg.locator(".segment-timestamp").inner_text())
-                                        seg_texts.append(seg.locator(".segment-text").inner_text())
-                                    except Exception:
-                                        continue
-
-                                for i in range(len(seg_texts)):
-                                    window_text = " ".join(seg_texts[i:min(i + 3, len(seg_texts))])
+                                for i in range(len(segment_data)):
+                                    window_text = " ".join([segment_data[j]['text'] for j in range(i, min(i + 3, len(segment_data)))])
                                     window_lower = window_text.lower()
                                     if keyword_tokens and all(tok in window_lower for tok in keyword_tokens):
                                         all_matches.append({
                                             'title': page.title(),
-                                            'timestamp': seg_times[i],
+                                            'timestamp': segment_data[i]['timestamp'],
                                             'ocr_text': window_text.replace('\n', ' ')
                                         })
-                                        st.write(f"✨ Match found at timestamp {seg_times[i]}!")
+                                        st.write(f"✨ Match found at timestamp {segment_data[i]['timestamp']}!")
                                         break
                             else:
                                 st.write("❌ Could not open transcript panel.")
