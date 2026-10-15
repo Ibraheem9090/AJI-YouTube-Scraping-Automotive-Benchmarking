@@ -130,22 +130,20 @@ with tab_run:
 
                         # Expand description (...more)
                         st.write("🔍 Expanding video description (...more)...")
-                        expanded = False
-                        for sel in ["button#expand", "tp-yt-paper-button#expand", "text=...more"]:
-                            try:
-                                page.click(sel, timeout=3000)
-                                expanded = True
-                                break
-                            except Exception:
-                                continue
-                        
-                        if not expanded:
-                            page.mouse.wheel(0, 300)
-                            page.wait_for_timeout(1000)
+                        try:
+                            page.evaluate("""() => {
+                                const exp = document.querySelector('tp-yt-paper-button#expand, button#expand, #description-inline-expander');
+                                if (exp) exp.click();
+                            }""")
+                            page.wait_for_timeout(1500)
+                        except Exception:
+                            pass
 
-                        # Open transcript panel via UI click
+                        # Open transcript panel via robust multi-step UI interaction
                         st.write("📂 Opening transcript panel...")
                         transcript_opened = False
+                        
+                        # Attempt 1: Direct button selectors
                         for sel in [
                             "button[aria-label*='Show transcript' i]", 
                             "button:has-text('Show transcript')", 
@@ -153,21 +151,37 @@ with tab_run:
                             "ytd-button-renderer:has-text('Transcript')"
                         ]:
                             try:
-                                page.click(sel, timeout=4000)
+                                page.click(sel, timeout=3000)
                                 transcript_opened = True
                                 break
                             except Exception:
                                 continue
 
+                        # Attempt 2: Click video action overflow menu '...' and select transcript
                         if not transcript_opened:
                             try:
-                                page.evaluate("""() => {
-                                    const buttons = Array.from(document.querySelectorAll('button, yt-formatted-string'));
-                                    const btn = buttons.find(b => b.innerText && b.innerText.toLowerCase().includes('transcript'));
-                                    if (btn) btn.click();
+                                more_actions_btn = page.locator("ytd-menu-renderer button, button[aria-label*='More actions']").first
+                                if more_actions_btn.is_visible(timeout=2000):
+                                    more_actions_btn.click()
+                                    page.wait_for_timeout(1000)
+                                    page.locator("tp-yt-paper-item:has-text('Transcript'), ytd-menu-service-item-renderer:has-text('Transcript')").click(timeout=3000)
+                                    transcript_opened = True
+                            except Exception:
+                                pass
+
+                        # Attempt 3: JavaScript fallback click
+                        if not transcript_opened:
+                            try:
+                                transcript_opened = page.evaluate("""() => {
+                                    const allEls = Array.from(document.querySelectorAll('button, yt-formatted-string, tp-yt-paper-item, ytd-button-renderer'));
+                                    const target = allEls.find(el => el.innerText && el.innerText.toLowerCase().includes('transcript'));
+                                    if (target) {
+                                        target.click();
+                                        return true;
+                                    }
+                                    return false;
                                 }""")
                                 page.wait_for_timeout(2000)
-                                transcript_opened = True
                             except Exception:
                                 pass
 
@@ -175,18 +189,28 @@ with tab_run:
                             st.warning(f"Could not open transcript panel for {video_id}.")
                             continue
 
-                        # Extract segments from active DOM transcript panel
+                        # Extract segments from active DOM transcript panel using Deep Shadow DOM traversal
                         st.write("⏳ Waiting for transcript DOM segments to render...")
                         page.wait_for_timeout(4000)
 
                         segments = page.evaluate("""() => {
-                            const panel = document.querySelector('ytd-engagement-panel-section-list-renderer[visibility="VISIBLE"]') || document;
-                            const items = Array.from(panel.querySelectorAll('ytd-transcript-segment-renderer'));
-                            return items.map(seg => {
-                                const timeEl = seg.querySelector('.segment-timestamp');
-                                const textEl = seg.querySelector('.segment-text');
-                                const timeStr = timeEl ? timeEl.innerText.trim() : "0:00";
+                            function querySelectorAllDeep(selector, root = document) {
+                                let results = Array.from(root.querySelectorAll(selector));
+                                const allElements = root.querySelectorAll('*');
+                                for (const el of allElements) {
+                                    if (el.shadowRoot) {
+                                        results.push(...querySelectorAllDeep(selector, el.shadowRoot));
+                                    }
+                                }
+                                return results;
+                            }
+
+                            const segments = querySelectorAllDeep('ytd-transcript-segment-renderer');
+                            return segments.map(seg => {
+                                const timeEl = seg.querySelector('.segment-timestamp') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
+                                const textEl = seg.querySelector('.segment-text') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
                                 
+                                const timeStr = timeEl ? timeEl.innerText.trim() : "0:00";
                                 const parts = timeStr.split(':');
                                 let sec = 0;
                                 if (parts.length === 2) {
