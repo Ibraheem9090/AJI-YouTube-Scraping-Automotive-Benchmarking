@@ -25,20 +25,35 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI YouTube Car Part Analyzer", layout="wide")
 
 st.title("🚗 AI Automotive Video & Part Analyzer — By Ibraheem")
-st.markdown("Automated multi-video transcript benchmarking pipeline powered by **Playwright UI Transcript Scraping**, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
+st.markdown("Automated multi-video transcript benchmarking pipeline powered by **Playwright Network Interception**, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
 tab_run, tab_studio = st.tabs(["🚀 Run Benchmarking Pipeline", "🛠️ LfD Workflow Studio (Schema Inspector)"])
 
 def scrape_transcript_via_playwright(page):
+    intercepted_events = []
+
+    def handle_response(response):
+        try:
+            if "timedtext" in response.url or "transcript" in response.url:
+                if response.status == 200:
+                    data = response.json()
+                    if isinstance(data, dict) and 'events' in data:
+                        intercepted_events.extend(data['events'])
+        except Exception:
+            pass
+
+    # Listen to network responses
+    page.on("response", handle_response)
+
     segments = []
     try:
-        # 1. Scroll down to bring description and transcript button into view
+        # Scroll down to bring description and transcript button into view
         page.evaluate("window.scrollBy(0, 500);")
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(1500)
 
-        # 2. Try expanding description if "Show transcript" is hidden inside
+        # Try expanding description if "Show transcript" is hidden inside
         try:
             page.evaluate("""() => {
                 const expandBtn = document.querySelector('#expand, tp-yt-paper-button#expand, #description-inline-expander');
@@ -48,7 +63,7 @@ def scrape_transcript_via_playwright(page):
         except Exception:
             pass
 
-        # 3. Click "Show transcript" via robust deep shadow DOM traversal
+        # Click "Show transcript" button
         clicked = page.evaluate("""() => {
             function findAndClick(root) {
                 const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
@@ -72,7 +87,6 @@ def scrape_transcript_via_playwright(page):
         }""")
 
         if not clicked:
-            # Fallback Playwright locators
             for selector in [
                 "button:has-text('Show transcript')",
                 "text=Show transcript",
@@ -88,48 +102,62 @@ def scrape_transcript_via_playwright(page):
                 except Exception:
                     continue
 
-        if not clicked:
-            return []
-
-        # 4. Wait for transcript panel to render
+        # Wait for network request to be intercepted or DOM to render
         page.wait_for_timeout(4000)
 
-        # 5. Extract segments via Deep Shadow DOM traversal
-        segments = page.evaluate("""() => {
-            function querySelectorAllDeep(selector, root = document) {
-                let results = Array.from(root.querySelectorAll(selector));
-                const allElements = root.querySelectorAll('*');
-                for (const el of allElements) {
-                    if (el.shadowRoot) {
-                        results.push(...querySelectorAllDeep(selector, el.shadowRoot));
+        # Strategy A: Parse intercepted network events if available
+        if intercepted_events:
+            for event in intercepted_events:
+                if 'segs' in event and 'tStartMs' in event:
+                    start_sec = event['tStartMs'] / 1000.0
+                    text = "".join([seg.get('utf8', '') for seg in event['segs']]).strip()
+                    if text and text != '\n':
+                        mins = int(start_sec // 60)
+                        secs = int(start_sec % 60)
+                        segments.append({
+                            'start_sec': start_sec,
+                            'timestamp': f"{mins}:{secs:02d}",
+                            'text': text
+                        })
+
+        # Strategy B: Fallback to DOM Scraping if network interception was empty
+        if not segments:
+            segments = page.evaluate("""() => {
+                function querySelectorAllDeep(selector, root = document) {
+                    let results = Array.from(root.querySelectorAll(selector));
+                    const allElements = root.querySelectorAll('*');
+                    for (const el of allElements) {
+                        if (el.shadowRoot) {
+                            results.push(...querySelectorAllDeep(selector, el.shadowRoot));
+                        }
                     }
-                }
-                return results;
-            }
-
-            const items = querySelectorAllDeep('ytd-transcript-segment-renderer');
-            return items.map(seg => {
-                const timeEl = seg.querySelector('.segment-timestamp') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
-                const textEl = seg.querySelector('.segment-text') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
-                
-                const timeStr = timeEl ? timeEl.innerText.trim() : "0:00";
-                const parts = timeStr.split(':');
-                let sec = 0;
-                if (parts.length === 2) {
-                    sec = parseInt(parts[0]) * 60 + parseInt(parts[1]);
-                } else if (parts.length === 3) {
-                    sec = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
+                    return results;
                 }
 
-                return {
-                    start_sec: sec,
-                    timestamp: timeStr,
-                    text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
-                };
-            });
-        }""")
+                const items = querySelectorAllDeep('ytd-transcript-segment-renderer');
+                return items.map(seg => {
+                    const timeEl = seg.querySelector('.segment-timestamp') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
+                    const textEl = seg.querySelector('.segment-text') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
+                    
+                    const timeStr = timeEl ? timeEl.innerText.trim() : "0:00";
+                    const parts = timeStr.split(':');
+                    let sec = 0;
+                    if (parts.length === 2) {
+                        sec = parseInt(parts[0]) * 60 + parseInt(parts[1]);
+                    } else if (parts.length === 3) {
+                        sec = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
+                    }
+
+                    return {
+                        start_sec: sec,
+                        timestamp: timeStr,
+                        text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
+                    };
+                });
+            }""")
+
     except Exception as e:
-        print(f"Playwright scraping error: {e}")
+        print(f"Transcript scraping error: {e}")
 
     return segments
 
@@ -235,7 +263,7 @@ with tab_run:
                         except Exception:
                             pass
 
-                        st.write(f"📖 Scraping transcript via Playwright UI for video ID: {video_id}")
+                        st.write(f"📖 Scraping transcript via Network Interception & DOM for video ID: {video_id}")
                         segments = scrape_transcript_via_playwright(page)
 
                         if not segments:
@@ -347,12 +375,6 @@ with tab_run:
                     story.append(Spacer(1, 20))
 
                 doc.build(story)
-
-                with open("Transcript_Analysis_Report.pdf", "rb") as f:
-                    st.download_button("📥 Download Structured PDF Report (Hyperlinked & Screenshots)", f, file_name="LfD_Report.pdf", mime="application/pdf")
-            else:
-                status_box.update(label="⚠️ Execution finished, but no matching segments were captured.", state="error", expanded=True)
-                st.warning("Try a different search keyword or check channel video availability.")
 
 with tab_studio:
     st.header("🛠️ LfD Workflow Studio (Read-Only Schema)")
