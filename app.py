@@ -2,6 +2,7 @@ import os
 import json
 import subprocess
 import re
+import time
 import streamlit as st
 
 @st.cache_resource
@@ -54,7 +55,6 @@ def parse_vtt_file(filepath):
                 parts = time_line.split('-->')
                 start_str = parts[0].strip().split()[0]
                 
-                # Convert time string to seconds
                 t_parts = start_str.replace(',', '.').split(':')
                 start_sec = 0.0
                 if len(t_parts) == 3:
@@ -64,8 +64,8 @@ def parse_vtt_file(filepath):
                 
                 text_lines = lines[time_line_idx + 1:]
                 text = " ".join(text_lines).strip()
-                text = re.sub(r'<[^>]+>', '', text) # Remove formatting tags
-                text = re.sub(r'\{[^}]+\}', '', text) # Remove cue tags
+                text = re.sub(r'<[^>]+>', '', text)
+                text = re.sub(r'\{[^}]+\}', '', text)
                 
                 if text:
                     mins = int(start_sec // 60)
@@ -158,13 +158,19 @@ with tab_run:
 
                     target_videos = video_urls[:max_videos]
                     st.write(f"🎬 Found {len(video_urls)} total videos. Processing top {len(target_videos)} video(s): {target_videos}")
+                    
+                    search_lower = search_keyword.lower().strip()
                     keyword_tokens = [t.lower() for t in search_keyword.split()]
 
-                    for v_url in target_videos:
+                    for idx, v_url in enumerate(target_videos):
                         try:
                             video_id = v_url.split("v=")[1].split("&")[0]
                         except Exception:
                             continue
+
+                        # Polite delay between requests to avoid HTTP 429 rate limits
+                        if idx > 0:
+                            time.sleep(3)
 
                         st.write(f"📖 Downloading auto-subtitles via yt-dlp for video ID: {video_id}")
                         sub_file_prefix = f"sub_{video_id}"
@@ -186,10 +192,8 @@ with tab_run:
                         except Exception as ydl_err:
                             st.warning(f"yt-dlp download note for {video_id}: {ydl_err}")
 
-                        # Parse the downloaded VTT file
                         segments = parse_vtt_file(vtt_filename)
                         
-                        # Cleanup temp subtitle file if exists
                         if os.path.exists(vtt_filename):
                             try:
                                 os.remove(vtt_filename)
@@ -202,15 +206,24 @@ with tab_run:
 
                         st.write(f"📊 Retrieved {len(segments)} transcript segments for {video_id}. Scanning for keyword matches...")
 
-                        # Scan for ALL matches in this video
+                        # Flexible matching: checks phrase substring or presence of main tokens
                         matched_indices = []
                         i = 0
                         while i < len(segments):
                             window_text = " ".join([segments[j]['text'] for j in range(i, min(i + 3, len(segments)))])
                             window_lower = window_text.lower()
-                            if keyword_tokens and all(tok in window_lower for tok in keyword_tokens):
+                            
+                            is_match = False
+                            if search_lower in window_lower:
+                                is_match = True
+                            elif keyword_tokens and all(tok in window_lower for tok in keyword_tokens):
+                                is_match = True
+                            elif keyword_tokens and any(tok in window_lower for tok in keyword_tokens) and len(keyword_tokens) == 1:
+                                is_match = True
+
+                            if is_match:
                                 matched_indices.append(i)
-                                i += 6  # Advance forward to avoid duplicate overlapping matches
+                                i += 6
                             else:
                                 i += 1
 
@@ -225,13 +238,11 @@ with tab_run:
                             page.wait_for_load_state("domcontentloaded")
                             page.wait_for_timeout(4000)
 
-                            # Dismiss consent overlays if present
                             try:
                                 page.locator("button[aria-label*='Accept all' i]").click(timeout=2000)
                             except Exception:
                                 pass
 
-                            # Capture clean viewport screenshot
                             screenshot_path = f"screenshot_{video_id}_{int(match_seg['start_sec'])}.png"
                             try:
                                 page.screenshot(path=screenshot_path)
@@ -279,7 +290,6 @@ with tab_run:
 
                     all_results.append({**match, 'analysis': analysis_text})
 
-                # Compile PDF Report with Hyperlinked Timestamps and Screenshots
                 doc = SimpleDocTemplate("Transcript_Analysis_Report.pdf", pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
                 styles = getSampleStyleSheet()
                 story = [
@@ -290,7 +300,6 @@ with tab_run:
                 for idx, item in enumerate(all_results, 1):
                     story.append(Paragraph(f"<b>Match {idx}: {item['title']}</b>", styles['Heading2']))
                     
-                    # Hyperlinked Timestamp in ReportLab Paragraph format
                     timestamp_link = f'<a href="{item["seek_url"]}" color="#2563EB"><u>{item["timestamp"]}</u></a>'
                     story.append(Paragraph(f"<b>Timestamp:</b> {timestamp_link}", styles['Normal']))
                     
