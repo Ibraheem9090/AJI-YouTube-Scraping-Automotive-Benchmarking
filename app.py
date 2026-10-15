@@ -173,13 +173,15 @@ with tab_run:
                                 except Exception as e:
                                     st.write(f"❌ Failed JS fallback: {e}")
 
-                            # Extract segments
+                            # Extract segments with proper async wait time
                             if transcript_opened:
-                                st.write("⏳ Waiting for transcript segments to render in DOM...")
+                                st.write("⏳ Waiting for transcript API segments to load...")
+                                page.wait_for_timeout(4000)  # Allow YouTube backend to populate DOM segments
+
                                 try:
-                                    page.wait_for_selector("ytd-transcript-segment-renderer", timeout=8000)
+                                    page.wait_for_selector("ytd-transcript-segment-renderer", timeout=10000)
                                 except Exception:
-                                    page.wait_for_timeout(3000)
+                                    pass
 
                                 segments = page.locator("ytd-transcript-segment-renderer").all()
                                 st.write(f"📊 Extracted {len(segments)} segment renderer(s).")
