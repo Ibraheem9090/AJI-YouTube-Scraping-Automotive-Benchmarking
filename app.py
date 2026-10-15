@@ -1,6 +1,7 @@
 import os
 import json
 import subprocess
+import re
 import streamlit as st
 
 @st.cache_resource
@@ -15,7 +16,6 @@ ensure_packages()
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
 import yt_dlp
-import requests
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
@@ -25,11 +25,60 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI YouTube Car Part Analyzer", layout="wide")
 
 st.title("🚗 AI Automotive Video & Part Analyzer — By Ibraheem")
-st.markdown("Automated multi-video transcript benchmarking pipeline powered by **yt-dlp subtitle extraction**, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
+st.markdown("Automated multi-video transcript benchmarking pipeline powered by **yt-dlp VTT subtitle parsing**, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
 tab_run, tab_studio = st.tabs(["🚀 Run Benchmarking Pipeline", "🛠️ LfD Workflow Studio (Schema Inspector)"])
+
+def parse_vtt_file(filepath):
+    segments = []
+    if not os.path.exists(filepath):
+        return segments
+    
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+
+        blocks = content.split('\n\n')
+        for block in blocks:
+            lines = block.strip().split('\n')
+            time_line_idx = -1
+            for idx, line in enumerate(lines):
+                if '-->' in line:
+                    time_line_idx = idx
+                    break
+            
+            if time_line_idx != -1:
+                time_line = lines[time_line_idx]
+                parts = time_line.split('-->')
+                start_str = parts[0].strip().split()[0]
+                
+                # Convert time string to seconds
+                t_parts = start_str.replace(',', '.').split(':')
+                start_sec = 0.0
+                if len(t_parts) == 3:
+                    start_sec = float(t_parts[0]) * 3600 + float(t_parts[1]) * 60 + float(t_parts[2])
+                elif len(t_parts) == 2:
+                    start_sec = float(t_parts[0]) * 60 + float(t_parts[1])
+                
+                text_lines = lines[time_line_idx + 1:]
+                text = " ".join(text_lines).strip()
+                text = re.sub(r'<[^>]+>', '', text) # Remove formatting tags
+                text = re.sub(r'\{[^}]+\}', '', text) # Remove cue tags
+                
+                if text:
+                    mins = int(start_sec // 60)
+                    secs = int(start_sec % 60)
+                    segments.append({
+                        'start_sec': start_sec,
+                        'timestamp': f"{mins}:{secs:02d}",
+                        'text': text
+                    })
+    except Exception as e:
+        print(f"VTT parse error: {e}")
+        
+    return segments
 
 with tab_run:
     st.header("Automated Benchmarking Execution")
@@ -117,46 +166,35 @@ with tab_run:
                         except Exception:
                             continue
 
-                        st.write(f"📖 Extracting subtitles via yt-dlp for video ID: {video_id}")
-                        segments = []
+                        st.write(f"📖 Downloading auto-subtitles via yt-dlp for video ID: {video_id}")
+                        sub_file_prefix = f"sub_{video_id}"
+                        vtt_filename = f"{sub_file_prefix}.en.vtt"
+                        
                         ydl_opts = {
-                            'skip_download': True,
                             'writeautomaticsub': True,
                             'subtitleslangs': ['en'],
+                            'subtitlesformat': 'vtt',
+                            'skip_download': True,
+                            'outtmpl': sub_file_prefix,
                             'quiet': True,
                             'no_warnings': True,
                         }
                         
                         try:
                             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                                info = ydl.extract_info(v_url, download=False)
-                                auto_caps = info.get('automatic_captions', {})
-                                manual_caps = info.get('subtitles', {})
-                                en_caps = auto_caps.get('en') or manual_caps.get('en')
-                                
-                                if en_caps:
-                                    target_format = next((cap for cap in en_caps if cap['ext'] == 'json3'), None)
-                                    if not target_format:
-                                        target_format = next((cap for cap in en_caps if cap['ext'] == 'vtt'), None)
-                                    
-                                    if target_format:
-                                        resp = requests.get(target_format['url'], timeout=15)
-                                        if target_format['ext'] == 'json3':
-                                            data = resp.json()
-                                            for event in data.get('events', []):
-                                                if 'segs' in event and 'tStartMs' in event:
-                                                    start_sec = event['tStartMs'] / 1000.0
-                                                    text = "".join([seg.get('utf8', '') for seg in event['segs']]).strip()
-                                                    if text and text != '\n':
-                                                        mins = int(start_sec // 60)
-                                                        secs = int(start_sec % 60)
-                                                        segments.append({
-                                                            'start_sec': start_sec,
-                                                            'timestamp': f"{mins}:{secs:02d}",
-                                                            'text': text
-                                                        })
+                                ydl.download([v_url])
                         except Exception as ydl_err:
-                            st.warning(f"yt-dlp extraction error for {video_id}: {ydl_err}")
+                            st.warning(f"yt-dlp download note for {video_id}: {ydl_err}")
+
+                        # Parse the downloaded VTT file
+                        segments = parse_vtt_file(vtt_filename)
+                        
+                        # Cleanup temp subtitle file if exists
+                        if os.path.exists(vtt_filename):
+                            try:
+                                os.remove(vtt_filename)
+                            except Exception:
+                                pass
 
                         if not segments:
                             st.warning(f"Could not retrieve transcript segments for {video_id}.")
