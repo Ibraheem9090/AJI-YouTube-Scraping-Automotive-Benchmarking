@@ -173,21 +173,35 @@ with tab_run:
                                 except Exception as e:
                                     st.write(f"❌ Failed JS fallback: {e}")
 
-                            # Extract segments using bulletproof JavaScript DOM evaluation
+                            # Extract segments using recursive Shadow DOM traversal
                             if transcript_opened:
                                 st.write("⏳ Waiting for transcript API segments to load...")
-                                page.wait_for_timeout(4000)  # Allow YouTube backend to populate DOM segments
+                                page.wait_for_timeout(5000)  # Allow YouTube backend to populate DOM segments
 
-                                st.write("🔎 Extracting transcript segments via JS DOM evaluation...")
+                                st.write("🔎 Extracting transcript segments via Deep Shadow DOM traversal...")
                                 segment_data = page.evaluate("""() => {
-                                    let segments = Array.from(document.querySelectorAll('ytd-transcript-segment-renderer'));
+                                    function querySelectorAllDeep(selector, root = document) {
+                                        let results = Array.from(root.querySelectorAll(selector));
+                                        const allElements = root.querySelectorAll('*');
+                                        for (const el of allElements) {
+                                            if (el.shadowRoot) {
+                                                results.push(...querySelectorAllDeep(selector, el.shadowRoot));
+                                            }
+                                        }
+                                        return results;
+                                    }
+
+                                    let segments = querySelectorAllDeep('ytd-transcript-segment-renderer');
                                     if (segments.length === 0) {
-                                        segments = Array.from(document.querySelectorAll('.segment-rendered, [class*="transcript-segment"]'));
+                                        segments = querySelectorAllDeep('.segment-rendered, [class*="transcript-segment"]');
                                     }
                                     
                                     return segments.map(seg => {
-                                        const timeEl = seg.querySelector('.segment-timestamp, [class*="timestamp"]');
-                                        const textEl = seg.querySelector('.segment-text, [class*="text"]');
+                                        const timeEl = seg.querySelector('.segment-timestamp, [class*="timestamp"]') || 
+                                                       (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
+                                        const textEl = seg.querySelector('.segment-text, [class*="text"]') || 
+                                                       (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
+                                        
                                         return {
                                             timestamp: timeEl ? timeEl.innerText.trim() : "0:00",
                                             text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
@@ -195,7 +209,7 @@ with tab_run:
                                     });
                                 }""")
 
-                                st.write(f"📊 Extracted {len(segment_data)} transcript segment(s) via JS.")
+                                st.write(f"📊 Extracted {len(segment_data)} transcript segment(s) via Shadow DOM traversal.")
 
                                 for i in range(len(segment_data)):
                                     window_text = " ".join([segment_data[j]['text'] for j in range(i, min(i + 3, len(segment_data)))])
