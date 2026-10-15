@@ -1,7 +1,6 @@
 import os
 import json
 import subprocess
-import base64
 import streamlit as st
 
 @st.cache_resource
@@ -15,6 +14,7 @@ ensure_playwright_installed()
 
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
+from youtube_transcript_api import YouTubeTranscriptApi
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
@@ -24,7 +24,7 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI YouTube Car Part Analyzer (LfD Studio)", layout="wide")
 
 st.title("🚗 AI Automotive Video & Part Analyzer (LfD Studio) — By Ibraheem")
-st.markdown("Declarative LfD pipeline driven by your recorded browser demonstration, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with video screenshots.")
+st.markdown("Declarative LfD pipeline driven by robust transcript extraction, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with video screenshots.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
@@ -48,19 +48,21 @@ with tab_run:
             value="Analyze the component's specifications, features, and context mentioned in this transcript segment."
         )
 
-    run_button = st.button("🚀 Run Demonstrated LfD Workflow & Generate PDF")
+    run_button = st.button("🚀 Run Benchmarking Pipeline & Generate PDF")
 
     if run_button:
         if not os.path.exists(WORKFLOW_FILE):
             st.error(f"Workflow file '{WORKFLOW_FILE}' not found! Please check the Workflow Studio tab.")
         else:
-            status_box = st.status("Initializing LfD Workflow...", expanded=True)
+            status_box = st.status("Initializing Benchmarking Pipeline...", expanded=True)
             
             with status_box:
                 all_matches = []
+                
+                # 1. Fetch Video URLs via Playwright
                 with sync_playwright() as p:
                     try:
-                        st.write("🌐 Launching headless Chromium container...")
+                        st.write("🌐 Launching headless Chromium container to discover videos...")
                         browser = p.chromium.launch(
                             headless=True,
                             args=[
@@ -89,23 +91,12 @@ with tab_run:
                         except Exception:
                             page.wait_for_timeout(4000)
 
-                        # Dismiss cookie banner if present
-                        try:
-                            consent_btn = page.locator("button[aria-label*='Accept all' i], ytd-button-renderer:has-text('Accept all')").first
-                            if consent_btn.is_visible(timeout=3000):
-                                consent_btn.click()
-                                st.write("🍪 Dismissed YouTube cookie consent banner.")
-                        except Exception:
-                            pass
-
-                        # Scroll down to hydrate video elements
+                        # Scroll down to hydrate video grid
                         st.write("📜 Scrolling page to trigger lazy-loaded video grid...")
                         for _ in range(3):
                             page.mouse.wheel(0, 800)
                             page.wait_for_timeout(1500)
 
-                        # Bulletproof JS extraction
-                        st.write("🔎 Extracting video URLs via robust DOM JavaScript query...")
                         video_urls = page.evaluate("""() => {
                             const anchors = Array.from(document.querySelectorAll('a'));
                             const urls = [];
@@ -120,140 +111,82 @@ with tab_run:
                         }""")
 
                         st.write(f"🎬 Found {len(video_urls)} video URL(s) to process: {video_urls[:max_videos]}")
+                        
                         keyword_tokens = [t.lower() for t in search_keyword.split()]
 
                         for v_url in video_urls[:max_videos]:
-                            st.write(f"🌐 Opening video page: {v_url}")
-                            page.goto(v_url, timeout=30000)
-                            page.wait_for_load_state("domcontentloaded")
-                            page.wait_for_timeout(3000)
+                            # Extract video ID (e.g. https://www.youtube.com/watch?v=XYZ -> XYZ)
+                            try:
+                                video_id = v_url.split("v=")[1].split("&")[0]
+                            except Exception:
+                                continue
 
-                            # Expand description (...more)
-                            st.write("🔍 Expanding video description (...more)...")
-                            expanded = False
-                            for sel in ["button#expand", "tp-yt-paper-button#expand", "text=...more"]:
-                                try:
-                                    page.click(sel, timeout=3000)
-                                    expanded = True
-                                    st.write(f"✔️ Clicked description expander using: `{sel}`")
+                            st.write(f"📖 Fetching transcript via API for video ID: {video_id}")
+                            try:
+                                raw_transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                            except Exception as api_err:
+                                st.warning(f"Could not fetch transcript for {video_id}: {api_err}")
+                                continue
+
+                            # Format transcript segments
+                            segments = []
+                            for entry in raw_transcript:
+                                start_sec = entry['start']
+                                minutes = int(start_sec // 60)
+                                seconds = int(start_sec % 60)
+                                timestamp_str = f"{minutes}:{seconds:02d}"
+                                segments.append({
+                                    'start_sec': start_sec,
+                                    'timestamp': timestamp_str,
+                                    'text': entry['text']
+                                })
+
+                            st.write(f"📊 Retrieved {len(segments)} transcript entries. Searching for keyword tokens: {keyword_tokens}")
+
+                            matched_index = -1
+                            for i in range(len(segments)):
+                                window_text = " ".join([segments[j]['text'] for j in range(i, min(i + 3, len(segments)))])
+                                window_lower = window_text.lower()
+                                if keyword_tokens and all(tok in window_lower for tok in keyword_tokens):
+                                    matched_index = i
                                     break
-                                except Exception:
-                                    continue
-                            
-                            if not expanded:
-                                page.mouse.wheel(0, 300)
-                                page.wait_for_timeout(1000)
 
-                            # Open transcript panel
-                            st.write("📂 Looking for 'Show transcript' button...")
-                            transcript_opened = False
-                            for sel in [
-                                "button[aria-label*='Show transcript' i]", 
-                                "button:has-text('Show transcript')", 
-                                "text=Show transcript",
-                                "ytd-button-renderer:has-text('Transcript')"
-                            ]:
+                            if matched_index != -1:
+                                match_seg = segments[matched_index]
+                                st.write(f"✨ Match found at timestamp {match_seg['timestamp']} ({match_seg['start_sec']}s)!")
+                                
+                                # Open video at exact timestamp using URL parameter &t=
+                                seek_url = f"{v_url}&t={int(match_seg['start_sec'])}s"
+                                st.write(f"🌐 Opening video player at timestamp: {seek_url}")
+                                page.goto(seek_url, timeout=30000)
+                                page.wait_for_load_state("domcontentloaded")
+                                page.wait_for_timeout(3500) # Wait for player to seek and render frame
+
+                                # Dismiss cookie/consent dialogs if blocking view
                                 try:
-                                    page.click(sel, timeout=4000)
-                                    transcript_opened = True
-                                    st.write(f"✔️ Opened transcript panel using selector: `{sel}`")
-                                    break
+                                    page.locator("button[aria-label*='Accept all' i]").click(timeout=2000)
                                 except Exception:
-                                    continue
+                                    pass
 
-                            if not transcript_opened:
+                                # Capture screenshot of the video player frame
+                                screenshot_path = f"screenshot_{video_id}.png"
                                 try:
-                                    page.evaluate("""() => {
-                                        const buttons = Array.from(document.querySelectorAll('button, yt-formatted-string'));
-                                        const btn = buttons.find(b => b.innerText && b.innerText.toLowerCase().includes('transcript'));
-                                        if (btn) btn.click();
-                                    }""")
-                                    page.wait_for_timeout(2000)
-                                    transcript_opened = True
-                                    st.write("✔️ JS fallback click executed for transcript.")
-                                except Exception as e:
-                                    st.write(f"❌ Failed JS fallback: {e}")
+                                    player = page.locator("video, #movie_player").first
+                                    player.screenshot(path=screenshot_path)
+                                    st.write("📸 Captured video player frame screenshot successfully!")
+                                except Exception:
+                                    page.screenshot(path=screenshot_path)
+                                    st.write("📸 Captured page screenshot successfully!")
 
-                            # Extract segments from active YouTube engagement panel
-                            if transcript_opened:
-                                st.write("⏳ Waiting for transcript API segments to load...")
-                                page.wait_for_timeout(5000)
-
-                                st.write("🔎 Extracting transcript segments from active YouTube engagement panel...")
-                                segment_data = page.evaluate("""() => {
-                                    const panel = document.querySelector('ytd-engagement-panel-section-list-renderer[visibility="VISIBLE"]') || document;
-                                    
-                                    function querySelectorAllDeep(selector, root = panel) {
-                                        let results = Array.from(root.querySelectorAll(selector));
-                                        const allElements = root.querySelectorAll('*');
-                                        for (const el of allElements) {
-                                            if (el.shadowRoot) {
-                                                results.push(...querySelectorAllDeep(selector, el.shadowRoot));
-                                            }
-                                        }
-                                        return results;
-                                    }
-
-                                    let segments = querySelectorAllDeep('ytd-transcript-segment-renderer');
-                                    if (segments.length === 0) {
-                                        segments = querySelectorAllDeep('.segment-rendered, [class*="transcript-segment"], yt-formatted-string.segment-text');
-                                    }
-                                    
-                                    return segments.map((seg, index) => {
-                                        const timeEl = seg.querySelector('.segment-timestamp, [class*="timestamp"]') || 
-                                                       (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
-                                        const textEl = seg.querySelector('.segment-text, [class*="text"]') || 
-                                                       (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
-                                        
-                                        return {
-                                            index: index,
-                                            timestamp: timeEl ? timeEl.innerText.trim() : "0:00",
-                                            text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
-                                        };
-                                    });
-                                }""")
-
-                                st.write(f"📊 Extracted {len(segment_data)} transcript segment(s) from panel.")
-
-                                for i in range(len(segment_data)):
-                                    window_text = " ".join([segment_data[j]['text'] for j in range(i, min(i + 3, len(segment_data)))])
-                                    window_lower = window_text.lower()
-                                    if keyword_tokens and all(tok in window_lower for tok in keyword_tokens):
-                                        st.write(f"✨ Match found at timestamp {segment_data[i]['timestamp']}! Clicking timestamp segment...")
-                                        
-                                        # Click the timestamp row to seek the video player to this timestamp
-                                        try:
-                                            page.evaluate(f"""(idx) => {{
-                                                const panel = document.querySelector('ytd-engagement-panel-section-list-renderer[visibility="VISIBLE"]') || document;
-                                                const segments = panel.querySelectorAll('ytd-transcript-segment-renderer');
-                                                if (segments[idx]) {{
-                                                    segments[idx].click();
-                                                }}
-                                            }}""", i)
-                                            page.wait_for_timeout(2500) # Allow video player to render the frame
-                                        except Exception as click_err:
-                                            st.write(f"Note on timestamp click: {click_err}")
-
-                                        # Capture video element screenshot
-                                        screenshot_path = f"screenshot_match_{len(all_matches)}.png"
-                                        try:
-                                            player = page.locator("video, #movie_player").first
-                                            player.screenshot(path=screenshot_path)
-                                            st.write(f"📸 Captured video frame screenshot at {segment_data[i]['timestamp']}!")
-                                        except Exception:
-                                            # Fallback: capture full browser page screenshot
-                                            page.screenshot(path=screenshot_path)
-                                            st.write(f"📸 Captured page screenshot at {segment_data[i]['timestamp']}!")
-
-                                        all_matches.append({
-                                            'title': page.title(),
-                                            'timestamp': segment_data[i]['timestamp'],
-                                            'ocr_text': window_text.replace('\n', ' '),
-                                            'screenshot': screenshot_path
-                                        })
-                                        break
+                                window_text = " ".join([segments[j]['text'] for j in range(matched_index, min(matched_index + 3, len(segments)))])
+                                all_matches.append({
+                                    'title': page.title(),
+                                    'timestamp': match_seg['timestamp'],
+                                    'ocr_text': window_text.replace('\n', ' '),
+                                    'screenshot': screenshot_path
+                                })
                             else:
-                                st.write("❌ Could not open transcript panel.")
+                                st.write("⚠️ Keyword not found in this video's transcript.")
 
                     except Exception as e:
                         st.error(f"Automation execution error: {str(e)}")
@@ -265,7 +198,7 @@ with tab_run:
 
                 if all_matches:
                     status_box.update(label="✅ Workflow Execution Complete & Successful!", state="complete", expanded=False)
-                    st.success(f"Successfully processed {len(all_matches)} matching segment(s)!")
+                    st.success(f"Successfully processed {len(all_matches)} matching segment(s) with screenshots!")
                     
                     all_results = []
                     base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
@@ -314,7 +247,7 @@ with tab_run:
                         st.download_button("📥 Download Structured PDF Report (With Screenshots)", f, file_name="LfD_Report.pdf", mime="application/pdf")
                 else:
                     status_box.update(label="⚠️ Execution finished, but no matching segments were captured.", state="error", expanded=True)
-                    st.warning("Check the live status box above to verify video URL extraction.")
+                    st.warning("Try a different search keyword or check channel video availability.")
 
 with tab_studio:
     st.header("🛠️ LfD Workflow Studio")

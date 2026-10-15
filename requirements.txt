@@ -2,4 +2,4 @@ streamlit
 playwright
 openai
 reportlab
-yt-dlp
+youtube-transcript-api
