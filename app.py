@@ -22,7 +22,7 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI Automotive Benchmarking", layout="wide")
 
 st.title("🚗 AI Automotive Channel-Wide Benchmarking")
-st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with direct stream frame extraction.")
+st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with robust local frame extraction.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
@@ -30,40 +30,54 @@ tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Benchmark", "🛠️ LfD 
 
 def extract_exact_frame(video_id, start_sec, output_path):
     """
-    Bypasses YouTube bot walls entirely by pulling the direct stream URL via yt-dlp
-    and extracting the exact frame at start_sec using OpenCV.
+    Downloads a tiny 3-second clip slice locally using yt-dlp and extracts the exact frame
+    using OpenCV, completely avoiding remote HTTP streaming restrictions and bot walls.
     """
+    temp_clip = f"temp_{video_id}_{int(start_sec)}.mp4"
     try:
         import cv2
         import yt_dlp
 
-        ydl_opts = {'format': 'best[height<=720]', 'quiet': True}
+        target_start = max(0.0, float(start_sec) - 0.5)
+        target_end = target_start + 3.0
+
+        ydl_opts = {
+            'format': '18/best',
+            'download_ranges': yt_dlp.utils.download_range_func(None, [(target_start, target_end)]),
+            'outtmpl': temp_clip,
+            'quiet': True,
+            'no_warnings': True
+        }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-            stream_url = info.get('url')
-            if not stream_url:
-                for f in info.get('formats', []):
-                    if f.get('url') and f.get('vcodec') != 'none' and f.get('acodec') != 'none':
-                        stream_url = f['url']
-                        break
-        
-        if not stream_url:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+
+        if not os.path.exists(temp_clip):
             return False
 
-        cap = cv2.VideoCapture(stream_url)
+        cap = cv2.VideoCapture(temp_clip)
         if not cap.isOpened():
+            if os.path.exists(temp_clip):
+                os.remove(temp_clip)
             return False
 
-        # Seek to exact millisecond timestamp
-        cap.set(cv2.CAP_PROP_POS_MSEC, float(start_sec) * 1000.0)
         ret, frame = cap.read()
         cap.release()
+
+        if os.path.exists(temp_clip):
+            os.remove(temp_clip)
 
         if ret and frame is not None:
             cv2.imwrite(output_path, frame)
             return True
+
     except Exception as e:
-        print(f"Frame extraction error: {e}")
+        print(f"Local clip extraction error: {e}")
+        if os.path.exists(temp_clip):
+            try:
+                os.remove(temp_clip)
+            except Exception:
+                pass
     return False
 
 with tab_run:
@@ -141,7 +155,7 @@ with tab_run:
                         
                         screenshot_path = f"screenshot_{video_id}_{exact_sec}.png"
                         
-                        # Extract exact frame via yt-dlp & OpenCV (No browser bot walls!)
+                        # Extract exact frame via local clip slicing
                         success_frame = extract_exact_frame(video_id, match['start_sec'], screenshot_path)
                         if not success_frame:
                             screenshot_path = None
