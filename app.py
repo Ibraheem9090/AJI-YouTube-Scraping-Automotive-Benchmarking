@@ -17,20 +17,21 @@ from playwright.sync_api import sync_playwright
 from openai import OpenAI
 
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
-st.set_page_config(page_title="AI YouTube Car Feature Analyzer", layout="wide")
+st.set_page_config(page_title="AI Automotive Benchmarking", layout="wide")
 
 st.title("🚗 AI Automotive Channel-Wide Benchmarking")
-st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) processed via **Nvidia Nemotron VLM** to generate comparative PDF reports.")
+st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) to benchmark vehicle features across the entire channel.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
-tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Generate PDF", "🛠️ LfD Workflow Studio (Schema Inspector)"])
+tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Benchmark", "🛠️ LfD Workflow Studio (Schema Inspector)"])
 
 with tab_run:
-    st.subheader("🔍 Query Channel Vector Index")
+    st.subheader("🔍 Search Channel Vector Index")
 
     channel_options = {"@CCR-Galib": "vector_db_CCR-Galib.json"}
     selected_channel = st.selectbox("Select Target Channel Index", options=list(channel_options.keys()))
@@ -59,16 +60,13 @@ with tab_run:
         value="Analyze this vehicle's feature specifications, design placement, and comparative implementation based on the video context."
     )
 
-    search_button = st.button("🚀 Query Vector DB & Build Comparative PDF Report")
+    search_button = st.button("🚀 Search Channel Benchmark")
 
     if search_button:
         if not raw_data:
             st.error("Vector database is empty or not loaded.")
         else:
-            search_status = st.status("Querying Vector Index & Compiling PDF Report...", expanded=True)
-            with search_status:
-                st.write(f"🔍 Searching {len(raw_data)} indexed chunks for query: **'{search_query}'**...")
-                
+            with st.spinner(f"Searching {len(raw_data)} indexed chunks for '{search_query}'..."):
                 query_tokens = set(re.findall(r'\w+', search_query.lower()))
                 scored_matches = []
 
@@ -83,7 +81,7 @@ with tab_run:
 
                 scored_matches.sort(key=lambda x: x[0], reverse=True)
 
-                # STRICT DEDUPLICATION: Ensure ONLY ONE match per unique video_id
+                # Strict Deduplication by unique video_id
                 top_matches = []
                 seen_videos = set()
                 for score, chunk in scored_matches:
@@ -94,14 +92,24 @@ with tab_run:
                     if len(top_matches) >= top_n_matches:
                         break
 
-                st.write(f"✨ Selected top {len(top_matches)} unique vehicle matches for the report.")
-
-                all_matches = []
+                all_results = []
                 if top_matches:
                     with sync_playwright() as p:
                         try:
-                            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
-                            page = browser.new_context(viewport={"width": 1280, "height": 800}).new_page()
+                            browser = p.chromium.launch(
+                                headless=True,
+                                args=[
+                                    "--no-sandbox",
+                                    "--disable-setuid-sandbox",
+                                    "--disable-blink-features=AutomationControlled",
+                                    "--disable-web-security"
+                                ]
+                            )
+                            context = browser.new_context(
+                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                                viewport={"width": 1280, "height": 720}
+                            )
+                            page = context.new_page()
 
                             base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
                             api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
@@ -110,26 +118,18 @@ with tab_run:
                             for match in top_matches:
                                 video_id = match['video_id']
                                 seek_url = f"https://www.youtube.com/watch?v={video_id}&t={int(match['start_sec'])}s"
-                                st.write(f"📸 Capturing video player snapshot for [{match['title'][:35]}...] at {match['timestamp']}...")
-
-                                page.goto(seek_url, timeout=30000)
-                                page.wait_for_load_state("domcontentloaded")
-                                page.wait_for_timeout(3500)
+                                
+                                # Use embed URL to bypass YouTube main page bot checks & capture clean player frame
+                                embed_url = f"https://www.youtube.com/embed/{video_id}?autoplay=1&start={int(match['start_sec'])}"
+                                
+                                page.goto(embed_url, timeout=30000)
+                                page.wait_for_timeout(3000)
 
                                 screenshot_path = f"screenshot_{video_id}_{int(match['start_sec'])}.png"
                                 try:
-                                    # Target ONLY the video player element to exclude sidebars, comments, and outer UI
-                                    player_element = page.locator("#movie_player, ytd-player, .html5-video-player").first
-                                    if player_element.is_visible(timeout=3000):
-                                        player_element.screenshot(path=screenshot_path)
-                                    else:
-                                        page.screenshot(path=screenshot_path)
+                                    page.screenshot(path=screenshot_path)
                                 except Exception as ss_err:
-                                    st.write(f"Screenshot cropping note: {ss_err}")
-                                    try:
-                                        page.screenshot(path=screenshot_path)
-                                    except Exception:
-                                        pass
+                                    st.warning(f"Screenshot error: {ss_err}")
 
                                 try:
                                     response = client.chat.completions.create(
@@ -140,10 +140,13 @@ with tab_run:
                                     )
                                     analysis_text = response.choices[0].message.content
                                 except Exception as e:
-                                    analysis_text = f"Nemotron VLM Analysis: {match['text']}"
+                                    analysis_text = f"Context Benchmark Analysis: {match['text']}"
 
-                                all_matches.append({
-                                    'title': match['title'],
+                                # Clean vehicle title formatting
+                                raw_title = match['title'].replace("- YouTube", "").strip()
+
+                                all_results.append({
+                                    'vehicle_title': raw_title,
                                     'timestamp': match['timestamp'],
                                     'seek_url': seek_url,
                                     'ocr_text': match['text'],
@@ -151,46 +154,117 @@ with tab_run:
                                     'analysis': analysis_text
                                 })
                         except Exception as browser_err:
-                            st.error(f"Browser playback error: {browser_err}")
+                            st.error(f"Playback error: {browser_err}")
                         finally:
                             try:
                                 browser.close()
                             except Exception:
                                 pass
 
-                if all_matches:
-                    search_status.update(label="✅ Comparative Report Generated!", state="complete", expanded=False)
+                st.session_state["search_results"] = all_results
+                st.session_state["query_name"] = search_query
 
-                    # Build PDF
-                    pdf_filename = "Channel_Comparative_Report.pdf"
-                    doc = SimpleDocTemplate(pdf_filename, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-                    styles = getSampleStyleSheet()
-                    story = [
-                        Paragraph(f"🚗 Channel-Wide Comparative Benchmarking Report: {search_query}", styles['Heading1']),
-                        Spacer(1, 15)
+    # Display Results In-Window First
+    if "search_results" in st.session_state and st.session_state["search_results"]:
+        results = st.session_state["search_results"]
+        q_name = st.session_state.get("query_name", "Feature Benchmark")
+
+        st.markdown("---")
+        st.subheader(f"📊 Benchmarking Results for: `{q_name}`")
+
+        for idx, res in enumerate(results, 1):
+            with st.container():
+                st.markdown(f"### Vehicle #{idx}: {res['vehicle_title']}")
+                
+                # Table Data Format
+                table_data = {
+                    "Field": ["Vehicle", "Timestamp Link", "Transcript Context", "AI Benchmark Analysis"],
+                    "Details": [
+                        res['vehicle_title'],
+                        f"[{res['timestamp']}]({res['seek_url']})",
+                        res['ocr_text'],
+                        res['analysis']
                     ]
+                }
+                st.table(table_data)
 
-                    for idx, item in enumerate(all_matches, 1):
-                        story.append(Paragraph(f"<b>Vehicle {idx}: {item['title']}</b>", styles['Heading2']))
-                        timestamp_link = f'<a href="{item["seek_url"]}" color="#2563EB"><u>{item["timestamp"]}</u></a>'
-                        story.append(Paragraph(f"<b>Timestamp:</b> {timestamp_link}", styles['Normal']))
-                        story.append(Paragraph(f"<b>Context:</b> {item['ocr_text']}", styles['Normal']))
-                        story.append(Spacer(1, 8))
+                # Cropped Image Below Table
+                if res['screenshot'] and os.path.exists(res['screenshot']):
+                    st.image(res['screenshot'], caption=f"Video Frame Snapshot @ {res['timestamp']}", width=640)
+                
+                st.markdown("---")
 
-                        if item['screenshot'] and os.path.exists(item['screenshot']):
-                            story.append(RLImage(item['screenshot'], width=380, height=215))
-                            story.append(Spacer(1, 10))
+        # PDF Export Section
+        st.subheader("📄 Export Benchmark Report")
+        
+        pdf_filename = f"Benchmark_Report_{q_name.replace(' ', '_')}.pdf"
+        doc = SimpleDocTemplate(
+            pdf_filename,
+            pagesize=letter,
+            rightMargin=36,
+            leftMargin=36,
+            topMargin=36,
+            bottomMargin=36
+        )
+        styles = getSampleStyleSheet()
+        
+        cell_style = ParagraphStyle(
+            'TableCell',
+            parent=styles['Normal'],
+            fontSize=9,
+            leading=12
+        )
+        cell_bold = ParagraphStyle(
+            'TableCellBold',
+            parent=styles['Normal'],
+            fontSize=9,
+            leading=12,
+            fontName='Helvetica-Bold'
+        )
 
-                        story.append(Paragraph("<b>AI Benchmark Analysis:</b>", styles['Heading3']))
-                        story.append(Paragraph(item['analysis'], styles['Normal']))
-                        story.append(Spacer(1, 20))
+        story = [
+            Paragraph(f"🚗 Automotive Benchmarking Report: {q_name}", styles['Heading1']),
+            Spacer(1, 12)
+        ]
 
-                    doc.build(story)
+        for idx, res in enumerate(results, 1):
+            story.append(Paragraph(f"<b>Result #{idx}: {res['vehicle_title']}</b>", styles['Heading2']))
+            story.append(Spacer(1, 6))
 
-                    with open(pdf_filename, "rb") as f:
-                        st.download_button("📥 Download Comparative PDF Report", f, file_name=pdf_filename, mime="application/pdf")
-                else:
-                    search_status.update(label="⚠️ No matches found for this query.", state="error", expanded=True)
+            t_link = f'<a href="{res["seek_url"]}" color="#2563EB"><u>{res["timestamp"]}</u></a>'
+            
+            table_content = [
+                [Paragraph("Vehicle", cell_bold), Paragraph(res['vehicle_title'], cell_style)],
+                [Paragraph("Timestamp", cell_bold), Paragraph(t_link, cell_style)],
+                [Paragraph("Context", cell_bold), Paragraph(res['ocr_text'], cell_style)],
+                [Paragraph("AI Analysis", cell_bold), Paragraph(res['analysis'], cell_style)],
+            ]
+
+            t = Table(table_content, colWidths=[100, 440])
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#F3F4F6')),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D1D5DB')),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('PADDING', (0, 0), (-1, -1), 6),
+            ]))
+            
+            story.append(t)
+            story.append(Spacer(1, 10))
+
+            # Image below table in PDF
+            if res['screenshot'] and os.path.exists(res['screenshot']):
+                story.append(RLImage(res['screenshot'], width=440, height=247))
+                story.append(Spacer(1, 20))
+
+        doc.build(story)
+
+        with open(pdf_filename, "rb") as pdf_file:
+            st.download_button(
+                label="📥 Download Structured Comparative PDF Report",
+                data=pdf_file,
+                file_name=pdf_filename,
+                mime="application/pdf"
+            )
 
 with tab_studio:
     st.header("🛠️ LfD Workflow Studio (Read-Only Schema)")
