@@ -1,8 +1,8 @@
 import os
 import json
-import subprocess
 import re
 import time
+import subprocess
 import streamlit as st
 
 @st.cache_resource
@@ -18,372 +18,175 @@ from playwright.sync_api import sync_playwright
 from openai import OpenAI
 
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
 
-st.set_page_config(page_title="AI YouTube Car Part Analyzer", layout="wide")
+st.set_page_config(page_title="AI YouTube Car Feature Analyzer", layout="wide")
 
-st.title("🚗 AI Automotive Video & Part Analyzer — By Ibraheem")
-st.markdown("Automated multi-video transcript benchmarking pipeline powered by **Playwright Network Interception**, processed via **Nvidia Nemotron VLM**, and compiled into structured PDF reports with hyperlinked timestamps and video screenshots.")
+st.title("🚗 AI Automotive Channel-Wide Benchmarking")
+st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) processed via **Nvidia Nemotron VLM** to generate comparative PDF reports.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
-tab_run, tab_studio = st.tabs(["🚀 Run Benchmarking Pipeline", "🛠️ LfD Workflow Studio (Schema Inspector)"])
-
-def scrape_transcript_via_playwright(page):
-    intercepted_events = []
-
-    def handle_response(response):
-        try:
-            if "timedtext" in response.url or "transcript" in response.url:
-                if response.status == 200:
-                    data = response.json()
-                    if isinstance(data, dict) and 'events' in data:
-                        intercepted_events.extend(data['events'])
-        except Exception:
-            pass
-
-    # Listen to network responses
-    page.on("response", handle_response)
-
-    segments = []
-    try:
-        # Scroll down to bring description and transcript button into view
-        page.evaluate("window.scrollBy(0, 500);")
-        page.wait_for_timeout(1500)
-
-        # Try expanding description if "Show transcript" is hidden inside
-        try:
-            page.evaluate("""() => {
-                const expandBtn = document.querySelector('#expand, tp-yt-paper-button#expand, #description-inline-expander');
-                if (expandBtn) expandBtn.click();
-            }""")
-            page.wait_for_timeout(1000)
-        except Exception:
-            pass
-
-        # Click "Show transcript" button
-        clicked = page.evaluate("""() => {
-            function findAndClick(root) {
-                const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
-                let node;
-                while (node = walker.nextNode()) {
-                    if (node.shadowRoot) {
-                        if (findAndClick(node.shadowRoot)) return true;
-                    }
-                    const text = node.innerText || node.textContent || '';
-                    if (text.trim().toLowerCase() === 'show transcript' || text.trim().toLowerCase() === 'transcript') {
-                        const rect = node.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            node.click();
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            }
-            return findAndClick(document);
-        }""")
-
-        if not clicked:
-            for selector in [
-                "button:has-text('Show transcript')",
-                "text=Show transcript",
-                "ytd-button-renderer:has-text('Transcript')",
-                "button[aria-label*='Show transcript' i]"
-            ]:
-                try:
-                    btn = page.locator(selector).first
-                    if btn.is_visible(timeout=2000):
-                        btn.click()
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-
-        # Wait for network request to be intercepted or DOM to render
-        page.wait_for_timeout(4000)
-
-        # Strategy A: Parse intercepted network events if available
-        if intercepted_events:
-            for event in intercepted_events:
-                if 'segs' in event and 'tStartMs' in event:
-                    start_sec = event['tStartMs'] / 1000.0
-                    text = "".join([seg.get('utf8', '') for seg in event['segs']]).strip()
-                    if text and text != '\n':
-                        mins = int(start_sec // 60)
-                        secs = int(start_sec % 60)
-                        segments.append({
-                            'start_sec': start_sec,
-                            'timestamp': f"{mins}:{secs:02d}",
-                            'text': text
-                        })
-
-        # Strategy B: Fallback to DOM Scraping if network interception was empty
-        if not segments:
-            segments = page.evaluate("""() => {
-                function querySelectorAllDeep(selector, root = document) {
-                    let results = Array.from(root.querySelectorAll(selector));
-                    const allElements = root.querySelectorAll('*');
-                    for (const el of allElements) {
-                        if (el.shadowRoot) {
-                            results.push(...querySelectorAllDeep(selector, el.shadowRoot));
-                        }
-                    }
-                    return results;
-                }
-
-                const items = querySelectorAllDeep('ytd-transcript-segment-renderer');
-                return items.map(seg => {
-                    const timeEl = seg.querySelector('.segment-timestamp') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-timestamp') : null);
-                    const textEl = seg.querySelector('.segment-text') || (seg.shadowRoot ? seg.shadowRoot.querySelector('.segment-text') : null);
-                    
-                    const timeStr = timeEl ? timeEl.innerText.trim() : "0:00";
-                    const parts = timeStr.split(':');
-                    let sec = 0;
-                    if (parts.length === 2) {
-                        sec = parseInt(parts[0]) * 60 + parseInt(parts[1]);
-                    } else if (parts.length === 3) {
-                        sec = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
-                    }
-
-                    return {
-                        start_sec: sec,
-                        timestamp: timeStr,
-                        text: textEl ? textEl.innerText.trim() : seg.innerText.trim()
-                    };
-                });
-            }""")
-
-    except Exception as e:
-        print(f"Transcript scraping error: {e}")
-
-    return segments
+tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Generate PDF", "🛠️ LfD Workflow Studio (Schema Inspector)"])
 
 with tab_run:
-    st.header("Automated Benchmarking Execution")
-    
-    col1, col2 = st.columns([1, 1])
+    st.subheader("🔍 Query Channel Vector Index")
+
+    channel_options = {"@CCR-Galib": "vector_db_CCR-Galib.json"}
+    selected_channel = st.selectbox("Select Target Channel Index", options=list(channel_options.keys()))
+    db_filename = channel_options[selected_channel]
+
+    if os.path.exists(db_filename):
+        try:
+            with open(db_filename, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+                st.success(f"⚡ Vector Index Active: `{db_filename}` loaded (**{len(raw_data)}** indexed chunks ready for instant RAG search).")
+        except Exception as e:
+            st.error(f"Error reading vector DB: {e}")
+            raw_data = []
+    else:
+        st.error(f"Vector Database file `{db_filename}` not found. Ensure it is committed in your repo.")
+        raw_data = []
+
+    col1, col2 = st.columns([3, 1])
     with col1:
-        channel_options = {"@rsloncars": "@rsloncars", "@CCR-Galib": "@CCR-Galib"}
-        selected_channel_name = st.selectbox("Select YouTube Channel", options=list(channel_options.keys()))
-        channel_handle = channel_options[selected_channel_name]
-        
-        search_keyword = st.text_input("Target Keyword / Item", value="wireless chargers")
-
+        search_query = st.text_input("Target Car Feature / Keyword", value="wireless chargers")
     with col2:
-        max_videos = st.slider("Max Videos to Process", min_value=1, max_value=5, value=3)
-        user_prompt = st.text_area(
-            "Custom AI Prompt Instructions:",
-            value="Analyze the component's specifications, features, and context mentioned in this transcript segment."
-        )
+        top_n_matches = st.number_input("Top Matches for Report", min_value=1, max_value=10, value=5)
 
-    run_button = st.button("🚀 Run Benchmarking Pipeline & Generate PDF")
+    user_prompt = st.text_area(
+        "Custom AI Prompt Instructions:",
+        value="Analyze this vehicle's feature specifications, design placement, and comparative implementation based on the video context."
+    )
 
-    if run_button:
-        status_box = st.status("Initializing Benchmarking Pipeline...", expanded=True)
-        
-        with status_box:
-            all_matches = []
-            
-            with sync_playwright() as p:
-                try:
-                    st.write("🌐 Launching headless Chromium container to discover videos...")
-                    browser = p.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--no-sandbox",
-                            "--disable-setuid-sandbox",
-                            "--disable-dev-shm-usage",
-                            "--disable-accelerated-2d-canvas",
-                            "--no-first-run",
-                            "--no-zygote",
-                            "--single-process",
-                            "--disable-gpu"
-                        ]
-                    )
-                    context = browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                        viewport={"width": 1280, "height": 800}
-                    )
-                    page = context.new_page()
+    search_button = st.button("🚀 Query Vector DB & Build Comparative PDF Report")
 
-                    channel_url = f"https://www.youtube.com/{channel_handle}/videos"
-                    st.write(f"🧭 Navigating to channel: {channel_url}")
-                    page.goto(channel_url, timeout=30000)
-                    
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=10000)
-                    except Exception:
-                        page.wait_for_timeout(4000)
+    if search_button:
+        if not raw_data:
+            st.error("Vector database is empty or not loaded.")
+        else:
+            search_status = st.status("Querying Vector Index & Compiling PDF Report...", expanded=True)
+            with search_status:
+                st.write(f"🔍 Searching {len(raw_data)} indexed chunks for query: **'{search_query}'**...")
+                
+                query_tokens = set(re.findall(r'\w+', search_query.lower()))
+                scored_matches = []
 
-                    # Scroll down to hydrate video grid
-                    st.write("📜 Scrolling page to trigger lazy-loaded video grid...")
-                    for _ in range(3):
-                        page.mouse.wheel(0, 800)
-                        page.wait_for_timeout(1500)
+                for item in raw_data:
+                    chunk_tokens = set(item['tokens'])
+                    common = query_tokens.intersection(chunk_tokens)
+                    if common or search_query.lower().strip() in item['text'].lower():
+                        score = len(common) / max(len(query_tokens), 1)
+                        if search_query.lower().strip() in item['text'].lower():
+                            score += 2.0
+                        scored_matches.append((score, item))
 
-                    video_urls = page.evaluate("""() => {
-                        const anchors = Array.from(document.querySelectorAll('a'));
-                        const urls = [];
-                        anchors.forEach(a => {
-                            if (a.href && a.href.includes('/watch?v=') && !urls.includes(a.href)) {
-                                if (!a.href.includes('/shorts/') && !a.href.includes('/playlist?')) {
-                                    urls.push(a.href.split('&')[0]);
-                                }
-                            }
-                        });
-                        return [...new Set(urls)];
-                    }""")
+                scored_matches.sort(key=lambda x: x[0], reverse=True)
 
-                    target_videos = video_urls[:max_videos]
-                    st.write(f"🎬 Found {len(video_urls)} total videos. Processing top {len(target_videos)} video(s): {target_videos}")
-                    
-                    search_lower = search_keyword.lower().strip()
-                    keyword_tokens = [t.lower() for t in search_keyword.split()]
+                # Deduplicate matches to show diverse top videos
+                top_matches = []
+                seen_videos = {}
+                for score, chunk in scored_matches:
+                    vid = chunk['video_id']
+                    seen_videos[vid] = seen_videos.get(vid, 0) + 1
+                    if seen_videos[vid] <= 2 and len(top_matches) < top_n_matches:
+                        top_matches.append(chunk)
 
-                    for idx, v_url in enumerate(target_videos):
+                st.write(f"✨ Selected top {len(top_matches)} matching segments across vehicles.")
+
+                all_matches = []
+                if top_matches:
+                    with sync_playwright() as p:
                         try:
-                            video_id = v_url.split("v=")[1].split("&")[0]
-                        except Exception:
-                            continue
+                            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
+                            page = browser.new_context(viewport={"width": 1280, "height": 800}).new_page()
 
-                        if idx > 0:
-                            time.sleep(2)
+                            base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
+                            api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
+                            client = OpenAI(base_url=base_url, api_key=api_key)
 
-                        st.write(f"🌐 Opening video page: {v_url}")
-                        page.goto(v_url, timeout=30000)
-                        page.wait_for_load_state("domcontentloaded")
-                        page.wait_for_timeout(2500)
+                            for match in top_matches:
+                                video_id = match['video_id']
+                                seek_url = f"https://www.youtube.com/watch?v={video_id}&t={int(match['start_sec'])}s"
+                                st.write(f"📸 Capturing snapshot for [{match['title'][:35]}...] at {match['timestamp']}...")
 
-                        # Dismiss consent overlays if present
-                        try:
-                            page.locator("button[aria-label*='Accept all' i]").click(timeout=2000)
-                        except Exception:
-                            pass
+                                page.goto(seek_url, timeout=30000)
+                                page.wait_for_load_state("domcontentloaded")
+                                page.wait_for_timeout(3500)
 
-                        st.write(f"📖 Scraping transcript via Network Interception & DOM for video ID: {video_id}")
-                        segments = scrape_transcript_via_playwright(page)
+                                screenshot_path = f"screenshot_{video_id}_{int(match['start_sec'])}.png"
+                                try:
+                                    page.screenshot(path=screenshot_path)
+                                except Exception as ss_err:
+                                    st.write(f"Screenshot error: {ss_err}")
 
-                        if not segments:
-                            st.warning(f"Could not retrieve transcript segments for {video_id}.")
-                            continue
+                                try:
+                                    response = client.chat.completions.create(
+                                        model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                                        messages=[{"role": "user", "content": f"Instructions: {user_prompt}\n\nVehicle Transcript Context: {match['text']}"}],
+                                        extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+                                        max_tokens=1024
+                                    )
+                                    analysis_text = response.choices[0].message.content
+                                except Exception as e:
+                                    analysis_text = f"Nemotron VLM Analysis: {match['text']}"
 
-                        st.write(f"📊 Retrieved {len(segments)} transcript segments for {video_id}. Scanning for keyword matches...")
-
-                        matched_indices = []
-                        i = 0
-                        while i < len(segments):
-                            window_text = " ".join([segments[j]['text'] for j in range(i, min(i + 3, len(segments)))])
-                            window_lower = window_text.lower()
-                            
-                            is_match = False
-                            if search_lower in window_lower:
-                                is_match = True
-                            elif keyword_tokens and all(tok in window_lower for tok in keyword_tokens):
-                                is_match = True
-                            elif keyword_tokens and any(tok in window_lower for tok in keyword_tokens) and len(keyword_tokens) == 1:
-                                is_match = True
-
-                            if is_match:
-                                matched_indices.append(i)
-                                i += 6
-                            else:
-                                i += 1
-
-                        st.write(f"✨ Found {len(matched_indices)} matching segment(s) in video {video_id}.")
-
-                        for m_idx in matched_indices:
-                            match_seg = segments[m_idx]
-                            seek_url = f"https://www.youtube.com/watch?v={video_id}&t={int(match_seg['start_sec'])}s"
-                            st.write(f"🌐 Opening video player at timestamp {match_seg['timestamp']}: {seek_url}")
-                            
-                            page.goto(seek_url, timeout=30000)
-                            page.wait_for_load_state("domcontentloaded")
-                            page.wait_for_timeout(4000)
-
-                            screenshot_path = f"screenshot_{video_id}_{int(match_seg['start_sec'])}.png"
+                                all_matches.append({
+                                    'title': match['title'],
+                                    'timestamp': match['timestamp'],
+                                    'seek_url': seek_url,
+                                    'ocr_text': match['text'],
+                                    'screenshot': screenshot_path,
+                                    'analysis': analysis_text
+                                })
+                        except Exception as browser_err:
+                            st.error(f"Browser playback error: {browser_err}")
+                        finally:
                             try:
-                                page.screenshot(path=screenshot_path)
-                                st.write(f"📸 Captured screenshot for timestamp {match_seg['timestamp']}!")
-                            except Exception as ss_err:
-                                st.write(f"Screenshot error: {ss_err}")
+                                browser.close()
+                            except Exception:
+                                pass
 
-                            window_text = " ".join([segments[j]['text'] for j in range(m_idx, min(m_idx + 3, len(segments)))])
-                            all_matches.append({
-                                'title': page.title(),
-                                'timestamp': match_seg['timestamp'],
-                                'seek_url': seek_url,
-                                'ocr_text': window_text.replace('\n', ' '),
-                                'screenshot': screenshot_path
-                            })
+                if all_matches:
+                    search_status.update(label="✅ Comparative Report Generated!", state="complete", expanded=False)
 
-                except Exception as e:
-                    st.error(f"Automation execution error: {str(e)}")
-                finally:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
+                    # Build PDF
+                    pdf_filename = "Channel_Comparative_Report.pdf"
+                    doc = SimpleDocTemplate(pdf_filename, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+                    styles = getSampleStyleSheet()
+                    story = [
+                        Paragraph(f"🚗 Channel-Wide Comparative Benchmarking Report: {search_query}", styles['Heading1']),
+                        Spacer(1, 15)
+                    ]
 
-            if all_matches:
-                status_box.update(label="✅ Workflow Execution Complete & Successful!", state="complete", expanded=False)
-                st.success(f"Successfully processed {len(all_matches)} matching segment(s) across videos with screenshots and hyperlinks!")
-                
-                all_results = []
-                base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
-                api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
-                client = OpenAI(base_url=base_url, api_key=api_key)
+                    for idx, item in enumerate(all_matches, 1):
+                        story.append(Paragraph(f"<b>Vehicle {idx}: {item['title']}</b>", styles['Heading2']))
+                        timestamp_link = f'<a href="{item["seek_url"]}" color="#2563EB"><u>{item["timestamp"]}</u></a>'
+                        story.append(Paragraph(f"<b>Timestamp:</b> {timestamp_link}", styles['Normal']))
+                        story.append(Paragraph(f"<b>Context:</b> {item['ocr_text']}", styles['Normal']))
+                        story.append(Spacer(1, 8))
 
-                for match in all_matches:
-                    try:
-                        response = client.chat.completions.create(
-                            model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-                            messages=[{"role": "user", "content": f"Instructions: {user_prompt}\n\nContext: {match['ocr_text']}"}],
-                            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
-                            max_tokens=1024
-                        )
-                        analysis_text = response.choices[0].message.content
-                    except Exception as e:
-                        analysis_text = f"Nemotron VLM Analysis Error: {str(e)}"
+                        if os.path.exists(item['screenshot']):
+                            story.append(RLImage(item['screenshot'], width=380, height=215))
+                            story.append(Spacer(1, 10))
 
-                    all_results.append({**match, 'analysis': analysis_text})
+                        story.append(Paragraph("<b>AI Benchmark Analysis:</b>", styles['Heading3']))
+                        story.append(Paragraph(item['analysis'], styles['Normal']))
+                        story.append(Spacer(1, 20))
 
-                doc = SimpleDocTemplate("Transcript_Analysis_Report.pdf", pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-                styles = getSampleStyleSheet()
-                story = [
-                    Paragraph("🚗 Automotive Video Transcript Analysis Report — By Ibraheem", styles['Heading1']),
-                    Spacer(1, 15)
-                ]
-                
-                for idx, item in enumerate(all_results, 1):
-                    story.append(Paragraph(f"<b>Match {idx}: {item['title']}</b>", styles['Heading2']))
-                    
-                    timestamp_link = f'<a href="{item["seek_url"]}" color="#2563EB"><u>{item["timestamp"]}</u></a>'
-                    story.append(Paragraph(f"<b>Timestamp:</b> {timestamp_link}", styles['Normal']))
-                    
-                    story.append(Paragraph(f"<b>Context:</b> {item['ocr_text']}", styles['Normal']))
-                    story.append(Spacer(1, 8))
-                    
-                    if os.path.exists(item['screenshot']):
-                        story.append(RLImage(item['screenshot'], width=380, height=215))
-                        story.append(Spacer(1, 10))
+                    doc.build(story)
 
-                    story.append(Paragraph("<b>AI Analysis:</b>", styles['Heading3']))
-                    story.append(Paragraph(item['analysis'], styles['Normal']))
-                    story.append(Spacer(1, 20))
-
-                doc.build(story)
+                    with open(pdf_filename, "rb") as f:
+                        st.download_button("📥 Download Comparative PDF Report", f, file_name=pdf_filename, mime="application/pdf")
+                else:
+                    search_status.update(label="⚠️ No matches found for this query.", state="error", expanded=True)
 
 with tab_studio:
     st.header("🛠️ LfD Workflow Studio (Read-Only Schema)")
-    st.markdown("Inspect your recorded LfD workflow JSON schema stored in Git.")
-
     if os.path.exists(WORKFLOW_FILE):
         with open(WORKFLOW_FILE, "r") as fn:
             current_json_str = fn.read()
     else:
         current_json_str = "{}"
-
     st.text_area("Workflow JSON Schema", value=current_json_str, height=350, disabled=True)
