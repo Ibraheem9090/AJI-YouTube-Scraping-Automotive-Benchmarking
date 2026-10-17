@@ -14,8 +14,9 @@ def ensure_packages():
 
 ensure_packages()
 
+# REMOVED top-level import of playwright_stealth to prevent startup crash
+
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 from openai import OpenAI
 
 from reportlab.lib.pagesizes import letter
@@ -38,11 +39,13 @@ def extract_exact_frame_stealth(video_id, start_sec, output_path):
     dismiss cookie dialogs, and capture the exact video player frame at the timestamp.
     """
     try:
+        # Lazy import inside function so package installation is guaranteed first
+        from playwright_stealth import stealth_sync
+
         with sync_playwright() as p:
             user_data_dir = "./playwright_user_data"
             os.makedirs(user_data_dir, exist_ok=True)
 
-            # Launch a persistent browser context to maintain session state & cookies
             browser_context = p.chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 headless=True,
@@ -58,14 +61,11 @@ def extract_exact_frame_stealth(video_id, start_sec, output_path):
             )
 
             page = browser_context.new_page()
-            
-            # Apply anti-detection stealth masking to hide navigator.webdriver flags
             stealth_sync(page)
 
             watch_url = f"https://www.youtube.com/watch?v={video_id}&t={int(start_sec)}s"
             page.goto(watch_url, timeout=40000)
 
-            # Automatically dismiss YouTube cookie consent banner if present
             try:
                 accept_btn = page.locator("button[aria-label='Accept all'], button:has-text('Accept all')").first
                 if accept_btn.is_visible(timeout=3000):
@@ -73,16 +73,13 @@ def extract_exact_frame_stealth(video_id, start_sec, output_path):
             except Exception:
                 pass
 
-            # Wait for video player element to load
             try:
                 page.wait_for_selector("#movie_player", timeout=12000)
             except Exception:
                 pass
 
-            # Allow buffer time for exact frame rendering
             page.wait_for_timeout(4500)
 
-            # Target ONLY the video player element to crop out sidebars and outer UI
             player_el = page.locator("#movie_player").first
             if player_el.is_visible(timeout=3000):
                 player_el.screenshot(path=output_path)
