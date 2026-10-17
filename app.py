@@ -117,19 +117,35 @@ with tab_run:
 
                             for match in top_matches:
                                 video_id = match['video_id']
-                                seek_url = f"https://www.youtube.com/watch?v={video_id}&t={int(match['start_sec'])}s"
+                                exact_sec = int(match['start_sec'])
                                 
-                                # FIX: Use autoplay=0 to prevent Error 153 in headless mode
-                                embed_url = f"https://www.youtube.com/embed/{video_id}?start={int(match['start_sec'])}&autoplay=0"
+                                # Exact transcript timestamp URL
+                                seek_url = f"https://www.youtube.com/watch?v={video_id}&t={exact_sec}s"
                                 
-                                page.goto(embed_url, timeout=30000)
-                                page.wait_for_timeout(3000)
-
-                                screenshot_path = f"screenshot_{video_id}_{int(match['start_sec'])}.png"
+                                page.goto(seek_url, timeout=30000)
+                                
+                                # Wait for video player element to mount and render the frame at exact timestamp
                                 try:
-                                    page.screenshot(path=screenshot_path)
+                                    page.wait_for_selector("#movie_player", timeout=10000)
+                                except Exception:
+                                    pass
+                                
+                                # Allow sufficient buffer time for YouTube player to render the exact timestamp frame
+                                page.wait_for_timeout(6000)
+
+                                screenshot_path = f"screenshot_{video_id}_{exact_sec}.png"
+                                try:
+                                    player_el = page.locator("#movie_player").first
+                                    if player_el.is_visible(timeout=3000):
+                                        player_el.screenshot(path=screenshot_path)
+                                    else:
+                                        page.screenshot(path=screenshot_path)
                                 except Exception as ss_err:
                                     st.warning(f"Screenshot error: {ss_err}")
+                                    try:
+                                        page.screenshot(path=screenshot_path)
+                                    except Exception:
+                                        pass
 
                                 try:
                                     response = client.chat.completions.create(
@@ -187,7 +203,7 @@ with tab_run:
                 st.table(table_data)
 
                 if res['screenshot'] and os.path.exists(res['screenshot']):
-                    st.image(res['screenshot'], caption=f"Video Frame Snapshot @ {res['timestamp']}", width=640)
+                    st.image(res['screenshot'], caption=f"Exact Timestamp Video Frame @ {res['timestamp']}", width=640)
                 
                 st.markdown("---")
 
@@ -229,7 +245,7 @@ with tab_run:
             story.append(Spacer(1, 6))
 
             t_link = f'<a href="{res["seek_url"]}" color="#2563EB"><u>{res["timestamp"]}</u></a>'
-
+            
             table_content = [
                 [Paragraph("Vehicle", cell_bold), Paragraph(res['vehicle_title'], cell_style)],
                 [Paragraph("Timestamp", cell_bold), Paragraph(t_link, cell_style)],
