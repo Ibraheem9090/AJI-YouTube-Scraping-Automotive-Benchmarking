@@ -7,7 +7,7 @@ import streamlit as st
 @st.cache_resource
 def ensure_packages():
     try:
-        subprocess.run(["pip", "install", "yt-dlp", "opencv-python"], check=True)
+        subprocess.run(["pip", "install", "yt-dlp", "opencv-python-headless"], check=True)
     except Exception as e:
         st.warning(f"Package setup note: {e}")
 
