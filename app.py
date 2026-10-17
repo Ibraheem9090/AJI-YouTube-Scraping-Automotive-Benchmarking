@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import time
 import subprocess
 import streamlit as st
 
@@ -53,7 +52,7 @@ with tab_run:
     with col1:
         search_query = st.text_input("Target Car Feature / Keyword", value="wireless chargers")
     with col2:
-        top_n_matches = st.number_input("Top Matches for Report", min_value=1, max_value=10, value=5)
+        top_n_matches = st.number_input("Top Unique Vehicle Matches", min_value=1, max_value=10, value=3)
 
     user_prompt = st.text_area(
         "Custom AI Prompt Instructions:",
@@ -84,16 +83,18 @@ with tab_run:
 
                 scored_matches.sort(key=lambda x: x[0], reverse=True)
 
-                # Deduplicate matches to show diverse top videos
+                # STRICT DEDUPLICATION: Ensure ONLY ONE match per unique video_id
                 top_matches = []
-                seen_videos = {}
+                seen_videos = set()
                 for score, chunk in scored_matches:
                     vid = chunk['video_id']
-                    seen_videos[vid] = seen_videos.get(vid, 0) + 1
-                    if seen_videos[vid] <= 2 and len(top_matches) < top_n_matches:
+                    if vid not in seen_videos:
+                        seen_videos.add(vid)
                         top_matches.append(chunk)
+                    if len(top_matches) >= top_n_matches:
+                        break
 
-                st.write(f"✨ Selected top {len(top_matches)} matching segments across vehicles.")
+                st.write(f"✨ Selected top {len(top_matches)} unique vehicle matches for the report.")
 
                 all_matches = []
                 if top_matches:
@@ -109,7 +110,7 @@ with tab_run:
                             for match in top_matches:
                                 video_id = match['video_id']
                                 seek_url = f"https://www.youtube.com/watch?v={video_id}&t={int(match['start_sec'])}s"
-                                st.write(f"📸 Capturing snapshot for [{match['title'][:35]}...] at {match['timestamp']}...")
+                                st.write(f"📸 Capturing video player snapshot for [{match['title'][:35]}...] at {match['timestamp']}...")
 
                                 page.goto(seek_url, timeout=30000)
                                 page.wait_for_load_state("domcontentloaded")
@@ -117,9 +118,18 @@ with tab_run:
 
                                 screenshot_path = f"screenshot_{video_id}_{int(match['start_sec'])}.png"
                                 try:
-                                    page.screenshot(path=screenshot_path)
+                                    # Target ONLY the video player element to exclude sidebars, comments, and outer UI
+                                    player_element = page.locator("#movie_player, ytd-player, .html5-video-player").first
+                                    if player_element.is_visible(timeout=3000):
+                                        player_element.screenshot(path=screenshot_path)
+                                    else:
+                                        page.screenshot(path=screenshot_path)
                                 except Exception as ss_err:
-                                    st.write(f"Screenshot error: {ss_err}")
+                                    st.write(f"Screenshot cropping note: {ss_err}")
+                                    try:
+                                        page.screenshot(path=screenshot_path)
+                                    except Exception:
+                                        pass
 
                                 try:
                                     response = client.chat.completions.create(
@@ -137,7 +147,7 @@ with tab_run:
                                     'timestamp': match['timestamp'],
                                     'seek_url': seek_url,
                                     'ocr_text': match['text'],
-                                    'screenshot': screenshot_path,
+                                    'screenshot': screenshot_path if os.path.exists(screenshot_path) else None,
                                     'analysis': analysis_text
                                 })
                         except Exception as browser_err:
@@ -167,7 +177,7 @@ with tab_run:
                         story.append(Paragraph(f"<b>Context:</b> {item['ocr_text']}", styles['Normal']))
                         story.append(Spacer(1, 8))
 
-                        if os.path.exists(item['screenshot']):
+                        if item['screenshot'] and os.path.exists(item['screenshot']):
                             story.append(RLImage(item['screenshot'], width=380, height=215))
                             story.append(Spacer(1, 10))
 
