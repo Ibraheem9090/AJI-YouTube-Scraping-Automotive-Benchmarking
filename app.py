@@ -119,8 +119,8 @@ with tab_run:
                                 video_id = match['video_id']
                                 seek_url = f"https://www.youtube.com/watch?v={video_id}&t={int(match['start_sec'])}s"
                                 
-                                # Use embed URL to bypass YouTube main page bot checks & capture clean player frame
-                                embed_url = f"https://www.youtube.com/embed/{video_id}?autoplay=1&start={int(match['start_sec'])}"
+                                # FIX: Use autoplay=0 to prevent Error 153 in headless mode
+                                embed_url = f"https://www.youtube.com/embed/{video_id}?start={int(match['start_sec'])}&autoplay=0"
                                 
                                 page.goto(embed_url, timeout=30000)
                                 page.wait_for_timeout(3000)
@@ -142,7 +142,6 @@ with tab_run:
                                 except Exception as e:
                                     analysis_text = f"Context Benchmark Analysis: {match['text']}"
 
-                                # Clean vehicle title formatting
                                 raw_title = match['title'].replace("- YouTube", "").strip()
 
                                 all_results.append({
@@ -176,7 +175,6 @@ with tab_run:
             with st.container():
                 st.markdown(f"### Vehicle #{idx}: {res['vehicle_title']}")
                 
-                # Table Data Format
                 table_data = {
                     "Field": ["Vehicle", "Timestamp Link", "Transcript Context", "AI Benchmark Analysis"],
                     "Details": [
@@ -188,7 +186,6 @@ with tab_run:
                 }
                 st.table(table_data)
 
-                # Cropped Image Below Table
                 if res['screenshot'] and os.path.exists(res['screenshot']):
                     st.image(res['screenshot'], caption=f"Video Frame Snapshot @ {res['timestamp']}", width=640)
                 
@@ -232,7 +229,7 @@ with tab_run:
             story.append(Spacer(1, 6))
 
             t_link = f'<a href="{res["seek_url"]}" color="#2563EB"><u>{res["timestamp"]}</u></a>'
-            
+
             table_content = [
                 [Paragraph("Vehicle", cell_bold), Paragraph(res['vehicle_title'], cell_style)],
                 [Paragraph("Timestamp", cell_bold), Paragraph(t_link, cell_style)],
@@ -251,7 +248,6 @@ with tab_run:
             story.append(t)
             story.append(Spacer(1, 10))
 
-            # Image below table in PDF
             if res['screenshot'] and os.path.exists(res['screenshot']):
                 story.append(RLImage(res['screenshot'], width=440, height=247))
                 story.append(Spacer(1, 20))
