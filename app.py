@@ -7,13 +7,14 @@ import streamlit as st
 @st.cache_resource
 def ensure_packages():
     try:
-        subprocess.run(["playwright", "install", "chromium"], check=True)
+        subprocess.run(["pip", "install", "yt-dlp", "opencv-python"], check=True)
     except Exception as e:
-        st.warning(f"Browser binary setup note: {e}")
+        st.warning(f"Package setup note: {e}")
 
 ensure_packages()
 
-from playwright.sync_api import sync_playwright
+import cv2
+import yt_dlp
 from openai import OpenAI
 
 from reportlab.lib.pagesizes import letter
@@ -24,11 +25,46 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI Automotive Benchmarking", layout="wide")
 
 st.title("🚗 AI Automotive Channel-Wide Benchmarking")
-st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) to benchmark vehicle features across the entire channel.")
+st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with direct stream frame extraction.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
 tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Benchmark", "🛠️ LfD Workflow Studio (Schema Inspector)"])
+
+def extract_exact_frame(video_id, start_sec, output_path):
+    """
+    Bypasses YouTube bot walls entirely by pulling the direct stream URL via yt-dlp
+    and extracting the exact frame at start_sec using OpenCV.
+    """
+    try:
+        ydl_opts = {'format': 'best[height<=720]', 'quiet': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            stream_url = info.get('url')
+            if not stream_url:
+                for f in info.get('formats', []):
+                    if f.get('url') and f.get('vcodec') != 'none' and f.get('acodec') != 'none':
+                        stream_url = f['url']
+                        break
+        
+        if not stream_url:
+            return False
+
+        cap = cv2.VideoCapture(stream_url)
+        if not cap.isOpened():
+            return False
+
+        # Seek to exact millisecond timestamp
+        cap.set(cv2.CAP_PROP_POS_MSEC, float(start_sec) * 1000.0)
+        ret, frame = cap.read()
+        cap.release()
+
+        if ret and frame is not None:
+            cv2.imwrite(output_path, frame)
+            return True
+    except Exception as e:
+        print(f"Frame extraction error: {e}")
+    return False
 
 with tab_run:
     st.subheader("🔍 Search Channel Vector Index")
@@ -94,87 +130,43 @@ with tab_run:
 
                 all_results = []
                 if top_matches:
-                    with sync_playwright() as p:
+                    base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
+                    api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
+                    client = OpenAI(base_url=base_url, api_key=api_key)
+
+                    for match in top_matches:
+                        video_id = match['video_id']
+                        exact_sec = int(match['start_sec'])
+                        seek_url = f"https://www.youtube.com/watch?v={video_id}&t={exact_sec}s"
+                        
+                        screenshot_path = f"screenshot_{video_id}_{exact_sec}.png"
+                        
+                        # Extract exact frame via yt-dlp & OpenCV (No browser bot walls!)
+                        success_frame = extract_exact_frame(video_id, match['start_sec'], screenshot_path)
+                        if not success_frame:
+                            screenshot_path = None
+
                         try:
-                            browser = p.chromium.launch(
-                                headless=True,
-                                args=[
-                                    "--no-sandbox",
-                                    "--disable-setuid-sandbox",
-                                    "--disable-blink-features=AutomationControlled",
-                                    "--disable-web-security"
-                                ]
+                            response = client.chat.completions.create(
+                                model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                                messages=[{"role": "user", "content": f"Instructions: {user_prompt}\n\nVehicle Transcript Context: {match['text']}"}],
+                                extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+                                max_tokens=1024
                             )
-                            context = browser.new_context(
-                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                                viewport={"width": 1280, "height": 720}
-                            )
-                            page = context.new_page()
+                            analysis_text = response.choices[0].message.content
+                        except Exception as e:
+                            analysis_text = f"Context Benchmark Analysis: {match['text']}"
 
-                            base_url = st.secrets.get("NEMOTRON_BASE_URL", "http://localhost:8000/v1")
-                            api_key = st.secrets.get("NEMOTRON_API_KEY", "not-needed")
-                            client = OpenAI(base_url=base_url, api_key=api_key)
+                        raw_title = match['title'].replace("- YouTube", "").strip()
 
-                            for match in top_matches:
-                                video_id = match['video_id']
-                                exact_sec = int(match['start_sec'])
-                                
-                                # Exact transcript timestamp URL
-                                seek_url = f"https://www.youtube.com/watch?v={video_id}&t={exact_sec}s"
-                                
-                                page.goto(seek_url, timeout=30000)
-                                
-                                # Wait for video player element to mount and render the frame at exact timestamp
-                                try:
-                                    page.wait_for_selector("#movie_player", timeout=10000)
-                                except Exception:
-                                    pass
-                                
-                                # Allow sufficient buffer time for YouTube player to render the exact timestamp frame
-                                page.wait_for_timeout(6000)
-
-                                screenshot_path = f"screenshot_{video_id}_{exact_sec}.png"
-                                try:
-                                    player_el = page.locator("#movie_player").first
-                                    if player_el.is_visible(timeout=3000):
-                                        player_el.screenshot(path=screenshot_path)
-                                    else:
-                                        page.screenshot(path=screenshot_path)
-                                except Exception as ss_err:
-                                    st.warning(f"Screenshot error: {ss_err}")
-                                    try:
-                                        page.screenshot(path=screenshot_path)
-                                    except Exception:
-                                        pass
-
-                                try:
-                                    response = client.chat.completions.create(
-                                        model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-                                        messages=[{"role": "user", "content": f"Instructions: {user_prompt}\n\nVehicle Transcript Context: {match['text']}"}],
-                                        extra_body={"chat_template_kwargs": {"enable_thinking": True}},
-                                        max_tokens=1024
-                                    )
-                                    analysis_text = response.choices[0].message.content
-                                except Exception as e:
-                                    analysis_text = f"Context Benchmark Analysis: {match['text']}"
-
-                                raw_title = match['title'].replace("- YouTube", "").strip()
-
-                                all_results.append({
-                                    'vehicle_title': raw_title,
-                                    'timestamp': match['timestamp'],
-                                    'seek_url': seek_url,
-                                    'ocr_text': match['text'],
-                                    'screenshot': screenshot_path if os.path.exists(screenshot_path) else None,
-                                    'analysis': analysis_text
-                                })
-                        except Exception as browser_err:
-                            st.error(f"Playback error: {browser_err}")
-                        finally:
-                            try:
-                                browser.close()
-                            except Exception:
-                                pass
+                        all_results.append({
+                            'vehicle_title': raw_title,
+                            'timestamp': match['timestamp'],
+                            'seek_url': seek_url,
+                            'ocr_text': match['text'],
+                            'screenshot': screenshot_path if screenshot_path and os.path.exists(screenshot_path) else None,
+                            'analysis': analysis_text
+                        })
 
                 st.session_state["search_results"] = all_results
                 st.session_state["query_name"] = search_query
@@ -204,6 +196,8 @@ with tab_run:
 
                 if res['screenshot'] and os.path.exists(res['screenshot']):
                     st.image(res['screenshot'], caption=f"Exact Timestamp Video Frame @ {res['timestamp']}", width=640)
+                else:
+                    st.info("⚠️ Frame snapshot extraction pending or unavailable for this segment.")
                 
                 st.markdown("---")
 
