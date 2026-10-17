@@ -7,7 +7,7 @@ import streamlit as st
 @st.cache_resource
 def ensure_packages():
     try:
-        subprocess.run(["pip", "install", "yt-dlp", "opencv-python-headless"], check=True)
+        subprocess.run(["pip", "install", "yt-dlp", "imageio-ffmpeg"], check=True)
     except Exception as e:
         st.warning(f"Package setup note: {e}")
 
@@ -22,7 +22,7 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI Automotive Benchmarking", layout="wide")
 
 st.title("🚗 AI Automotive Channel-Wide Benchmarking")
-st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with robust local frame extraction.")
+st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with lightning-fast frame extraction.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
@@ -30,55 +30,39 @@ tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Benchmark", "🛠️ LfD 
 
 def extract_exact_frame(video_id, start_sec, output_path):
     """
-    Downloads a tiny 3-second clip slice locally using yt-dlp and extracts the exact frame
-    using OpenCV, completely avoiding remote HTTP streaming restrictions and bot walls.
+    Uses yt-dlp to get the direct stream URL and bundled imageio-ffmpeg to snap 
+    the exact frame at start_sec instantly without any system dependencies or bot walls.
     """
-    temp_clip = f"temp_{video_id}_{int(start_sec)}.mp4"
     try:
-        import cv2
         import yt_dlp
+        import imageio_ffmpeg
 
-        target_start = max(0.0, float(start_sec) - 0.5)
-        target_end = target_start + 3.0
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 
-        ydl_opts = {
-            'format': '18/best',
-            'download_ranges': yt_dlp.utils.download_range_func(None, [(target_start, target_end)]),
-            'outtmpl': temp_clip,
-            'quiet': True,
-            'no_warnings': True
-        }
-
+        ydl_opts = {'format': 'best[height<=720]/best', 'quiet': True}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
-
-        if not os.path.exists(temp_clip):
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            stream_url = info.get('url')
+            if not stream_url:
+                for f in info.get('formats', []):
+                    if f.get('url') and f.get('vcodec') != 'none':
+                        stream_url = f['url']
+                        break
+        
+        if not stream_url:
             return False
 
-        cap = cv2.VideoCapture(temp_clip)
-        if not cap.isOpened():
-            if os.path.exists(temp_clip):
-                os.remove(temp_clip)
-            return False
-
-        ret, frame = cap.read()
-        cap.release()
-
-        if os.path.exists(temp_clip):
-            os.remove(temp_clip)
-
-        if ret and frame is not None:
-            cv2.imwrite(output_path, frame)
-            return True
+        # Use bundled ffmpeg to extract the exact frame at start_sec
+        cmd = [
+            ffmpeg_exe, '-ss', str(start_sec), '-i', stream_url,
+            '-vframes', '1', '-q:v', '2', output_path, '-y'
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
 
     except Exception as e:
-        print(f"Local clip extraction error: {e}")
-        if os.path.exists(temp_clip):
-            try:
-                os.remove(temp_clip)
-            except Exception:
-                pass
-    return False
+        print(f"Frame extraction error: {e}")
+        return False
 
 with tab_run:
     st.subheader("🔍 Search Channel Vector Index")
@@ -155,7 +139,7 @@ with tab_run:
                         
                         screenshot_path = f"screenshot_{video_id}_{exact_sec}.png"
                         
-                        # Extract exact frame via local clip slicing
+                        # Extract exact frame instantly via yt-dlp + bundled ffmpeg
                         success_frame = extract_exact_frame(video_id, match['start_sec'], screenshot_path)
                         if not success_frame:
                             screenshot_path = None
