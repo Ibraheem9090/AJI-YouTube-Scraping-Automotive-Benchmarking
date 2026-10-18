@@ -1,17 +1,9 @@
 import os
 import json
 import re
-import subprocess
 import streamlit as st
-
-@st.cache_resource
-def ensure_packages():
-    try:
-        subprocess.run(["pip", "install", "yt-dlp", "imageio-ffmpeg"], check=True)
-    except Exception as e:
-        st.warning(f"Package setup note: {e}")
-
-ensure_packages()
+import urllib.request
+import tempfile
 
 from openai import OpenAI
 from reportlab.lib.pagesizes import letter
@@ -22,58 +14,11 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI Automotive Benchmarking", layout="wide")
 
 st.title("🚗 AI Automotive Channel-Wide Benchmarking")
-st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with client-emulated frame extraction.")
+st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with interactive client-side video embedding.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
 tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Benchmark", "🛠️ LfD Workflow Studio (Schema Inspector)"])
-
-def extract_exact_frame_ytdlp(video_id, start_sec, output_path):
-    """
-    Uses yt-dlp with Android/Web player client emulation to bypass YouTube 403/bot blocks,
-    paired with bundled imageio-ffmpeg to snap the exact frame at start_sec.
-    """
-    try:
-        import yt_dlp
-        import imageio_ffmpeg
-
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-
-        # Emulate official clients to bypass YouTube's cloud blockades
-        ydl_opts = {
-            'format': 'best[height<=720]/best',
-            'quiet': True,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'web']
-                }
-            }
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-            stream_url = info.get('url')
-            if not stream_url:
-                for f in info.get('formats', []):
-                    if f.get('url') and f.get('vcodec') != 'none':
-                        stream_url = f['url']
-                        break
-        
-        if not stream_url:
-            return False
-
-        # Use bundled ffmpeg to extract the exact frame at start_sec
-        cmd = [
-            ffmpeg_exe, '-ss', str(start_sec), '-i', stream_url,
-            '-vframes', '1', '-q:v', '2', output_path, '-y'
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
-
-    except Exception as e:
-        print(f"ytdlp extraction error: {e}")
-        return False
 
 with tab_run:
     st.subheader("🔍 Search Channel Vector Index")
@@ -148,13 +93,6 @@ with tab_run:
                         exact_sec = int(match['start_sec'])
                         seek_url = f"https://www.youtube.com/watch?v={video_id}&t={exact_sec}s"
                         
-                        screenshot_path = f"screenshot_{video_id}_{exact_sec}.png"
-                        
-                        # Extract exact frame via yt-dlp client emulation + bundled ffmpeg
-                        success_frame = extract_exact_frame_ytdlp(video_id, match['start_sec'], screenshot_path)
-                        if not success_frame:
-                            screenshot_path = None
-
                         try:
                             response = client.chat.completions.create(
                                 model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
@@ -169,11 +107,12 @@ with tab_run:
                         raw_title = match['title'].replace("- YouTube", "").strip()
 
                         all_results.append({
+                            'video_id': video_id,
                             'vehicle_title': raw_title,
                             'timestamp': match['timestamp'],
+                            'start_sec': exact_sec,
                             'seek_url': seek_url,
                             'ocr_text': match['text'],
-                            'screenshot': screenshot_path if screenshot_path and os.path.exists(screenshot_path) else None,
                             'analysis': analysis_text
                         })
 
@@ -203,10 +142,9 @@ with tab_run:
                 }
                 st.table(table_data)
 
-                if res['screenshot'] and os.path.exists(res['screenshot']):
-                    st.image(res['screenshot'], caption=f"Exact Timestamp Video Frame @ {res['timestamp']}", width=640)
-                else:
-                    st.info("⚠️ Frame snapshot extraction pending or unavailable for this segment.")
+                # Client-Side Interactive YouTube Player Embed loaded in visitor's browser
+                embed_url = f"https://www.youtube.com/embed/{res['video_id']}?start={res['start_sec']}"
+                st.components.v1.iframe(embed_url, width=640, height=360)
                 
                 st.markdown("---")
 
@@ -267,9 +205,19 @@ with tab_run:
             story.append(t)
             story.append(Spacer(1, 10))
 
-            if res['screenshot'] and os.path.exists(res['screenshot']):
-                story.append(RLImage(res['screenshot'], width=440, height=247))
+            # Dynamically pull official YouTube thumbnail for PDF export
+            try:
+                thumb_url = f"https://img.youtube.com/vi/{res['video_id']}/hqdefault.jpg"
+                with urllib.request.urlopen(thumb_url) as u:
+                    raw_img = u.read()
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_img:
+                    tmp_img.write(raw_img)
+                    tmp_img_path = tmp_img.name
+
+                story.append(RLImage(tmp_img_path, width=440, height=247))
                 story.append(Spacer(1, 20))
+            except Exception:
+                pass
 
         doc.build(story)
 
