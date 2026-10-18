@@ -1,3 +1,5 @@
 streamlit
 openai
 reportlab
+yt-dlp
+opencv-python-headless

@@ -1,9 +1,8 @@
 import os
 import json
 import re
-import base64
+import subprocess
 import tempfile
-import urllib.request
 import streamlit as st
 
 from openai import OpenAI
@@ -15,11 +14,48 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI Automotive Benchmarking", layout="wide")
 
 st.title("🚗 AI Automotive Channel-Wide Benchmarking")
-st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with exact-timestamp visual frame capture for PDF export.")
+st.markdown("Query the channel-wide pre-indexed RAG vector store with exact-timestamp frame slicing for UI display and PDF export.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
 tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Benchmark", "🛠️ LfD Workflow Studio (Schema Inspector)"])
+
+def extract_exact_frame(video_id, start_sec, output_path):
+    """
+    Uses yt-dlp to get the direct stream URL and native system ffmpeg 
+    to slice the exact frame at start_sec.
+    """
+    try:
+        import yt_dlp
+
+        ydl_opts = {
+            'format': 'best[height<=720]/best',
+            'quiet': True,
+            'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            stream_url = info.get('url')
+            if not stream_url:
+                for f in info.get('formats', []):
+                    if f.get('url') and f.get('vcodec') != 'none':
+                        stream_url = f['url']
+                        break
+        
+        if not stream_url:
+            return False
+
+        # Use system ffmpeg to slice the exact frame at start_sec
+        cmd = [
+            'ffmpeg', '-ss', str(start_sec), '-i', stream_url,
+            '-vframes', '1', '-q:v', '2', output_path, '-y'
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+
+    except Exception as e:
+        print(f"Frame extraction error: {e}")
+        return False
 
 with tab_run:
     st.subheader("🔍 Search Channel Vector Index")
@@ -93,6 +129,11 @@ with tab_run:
                         video_id = match['video_id']
                         exact_sec = int(match['start_sec'])
                         seek_url = f"https://www.youtube.com/watch?v={video_id}&t={exact_sec}s"
+                        
+                        screenshot_path = f"screenshot_{video_id}_{exact_sec}.png"
+                        success_frame = extract_exact_frame(video_id, match['start_sec'], screenshot_path)
+                        if not success_frame:
+                            screenshot_path = None
 
                         try:
                             response = client.chat.completions.create(
@@ -114,13 +155,14 @@ with tab_run:
                             'start_sec': exact_sec,
                             'seek_url': seek_url,
                             'ocr_text': match['text'],
+                            'screenshot': screenshot_path if screenshot_path and os.path.exists(screenshot_path) else None,
                             'analysis': analysis_text
                         })
 
                 st.session_state["search_results"] = all_results
                 st.session_state["query_name"] = search_query
 
-    # Display Results & Export PDF
+    # Display Results In-Window
     if "search_results" in st.session_state and st.session_state["search_results"]:
         results = st.session_state["search_results"]
         q_name = st.session_state.get("query_name", "Feature Benchmark")
@@ -143,15 +185,18 @@ with tab_run:
                 }
                 st.table(table_data)
 
-                # Client-Side Embed with exact start timestamp
-                embed_url = f"https://www.youtube.com/embed/{res['video_id']}?start={res['start_sec']}&autoplay=0"
-                st.components.v1.iframe(embed_url, width=640, height=360)
-
+                # Display exact timestamp sliced frame image in UI
+                if res['screenshot'] and os.path.exists(res['screenshot']):
+                    st.image(res['screenshot'], caption=f"Exact Timestamp Frame @ {res['timestamp']}", width=640)
+                else:
+                    embed_url = f"https://www.youtube.com/embed/{res['video_id']}?start={res['start_sec']}"
+                    st.components.v1.iframe(embed_url, width=640, height=360)
+                
                 st.markdown("---")
 
-        # PDF Export Section
+        # PDF Export Section with Exact Sliced Frames
         st.subheader("📄 Export Benchmark Report")
-
+        
         pdf_filename = f"Benchmark_Report_{q_name.replace(' ', '_')}.pdf"
         doc = SimpleDocTemplate(
             pdf_filename,
@@ -162,20 +207,9 @@ with tab_run:
             bottomMargin=36
         )
         styles = getSampleStyleSheet()
-
-        cell_style = ParagraphStyle(
-            'TableCell',
-            parent=styles['Normal'],
-            fontSize=9,
-            leading=12
-        )
-        cell_bold = ParagraphStyle(
-            'TableCellBold',
-            parent=styles['Normal'],
-            fontSize=9,
-            leading=12,
-            fontName='Helvetica-Bold'
-        )
+        
+        cell_style = ParagraphStyle('TableCell', parent=styles['Normal'], fontSize=9, leading=12)
+        cell_bold = ParagraphStyle('TableCellBold', parent=styles['Normal'], fontSize=9, leading=12, fontName='Helvetica-Bold')
 
         story = [
             Paragraph(f"🚗 Automotive Benchmarking Report: {q_name}", styles['Heading1']),
@@ -187,7 +221,7 @@ with tab_run:
             story.append(Spacer(1, 6))
 
             t_link = f'<a href="{res["seek_url"]}" color="#2563EB"><u>{res["timestamp"]}</u></a>'
-
+            
             table_content = [
                 [Paragraph("Vehicle", cell_bold), Paragraph(res['vehicle_title'], cell_style)],
                 [Paragraph("Timestamp", cell_bold), Paragraph(t_link, cell_style)],
@@ -202,29 +236,14 @@ with tab_run:
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('PADDING', (0, 0), (-1, -1), 6),
             ]))
-
+            
             story.append(t)
             story.append(Spacer(1, 10))
 
-            # Fetch high-resolution YouTube frame thumbnail for PDF rendering
-            try:
-                # Use maxresdefault or hqdefault frame image
-                thumb_url = f"https://img.youtube.com/vi/{res['video_id']}/hqdefault.jpg"
-                req = urllib.request.Request(
-                    thumb_url, 
-                    headers={'User-Agent': 'Mozilla/5.0'}
-                )
-                with urllib.request.urlopen(req) as u:
-                    raw_img = u.read()
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_img:
-                    tmp_img.write(raw_img)
-                    tmp_img_path = tmp_img.name
-
-                story.append(RLImage(tmp_img_path, width=440, height=247))
+            # Embed the exact sliced timestamp frame into the PDF report
+            if res['screenshot'] and os.path.exists(res['screenshot']):
+                story.append(RLImage(res['screenshot'], width=440, height=247))
                 story.append(Spacer(1, 20))
-            except Exception as img_err:
-                st.warning(f"Note on PDF image embedding: {img_err}")
 
         doc.build(story)
 
