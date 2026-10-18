@@ -7,18 +7,13 @@ import streamlit as st
 @st.cache_resource
 def ensure_packages():
     try:
-        subprocess.run(["pip", "install", "yt-dlp", "imageio-ffmpeg", "playwright-stealth"], check=True)
-        subprocess.run(["playwright", "install", "chromium"], check=True)
+        subprocess.run(["pip", "install", "yt-dlp", "imageio-ffmpeg"], check=True)
     except Exception as e:
-        st.warning(f"Package/browser setup note: {e}")
+        st.warning(f"Package setup note: {e}")
 
 ensure_packages()
 
-# REMOVED top-level import of playwright_stealth to prevent startup crash
-
-from playwright.sync_api import sync_playwright
 from openai import OpenAI
-
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -27,70 +22,57 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI Automotive Benchmarking", layout="wide")
 
 st.title("🚗 AI Automotive Channel-Wide Benchmarking")
-st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with Stealth Playwright frame extraction.")
+st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with client-emulated frame extraction.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
 tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Benchmark", "🛠️ LfD Workflow Studio (Schema Inspector)"])
 
-def extract_exact_frame_stealth(video_id, start_sec, output_path):
+def extract_exact_frame_ytdlp(video_id, start_sec, output_path):
     """
-    Uses Playwright with persistent context and playwright-stealth to bypass bot-detection walls,
-    dismiss cookie dialogs, and capture the exact video player frame at the timestamp.
+    Uses yt-dlp with Android/Web player client emulation to bypass YouTube 403/bot blocks,
+    paired with bundled imageio-ffmpeg to snap the exact frame at start_sec.
     """
     try:
-        # Lazy import inside function so package installation is guaranteed first
-        from playwright_stealth import stealth_sync
+        import yt_dlp
+        import imageio_ffmpeg
 
-        with sync_playwright() as p:
-            user_data_dir = "./playwright_user_data"
-            os.makedirs(user_data_dir, exist_ok=True)
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 
-            browser_context = p.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-infobars",
-                    "--disable-blink-features=AutomationControlled",
-                    "--window-size=1280,720"
-                ],
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 720}
-            )
+        # Emulate official clients to bypass YouTube's cloud blockades
+        ydl_opts = {
+            'format': 'best[height<=720]/best',
+            'quiet': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web']
+                }
+            }
+        }
 
-            page = browser_context.new_page()
-            stealth_sync(page)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            stream_url = info.get('url')
+            if not stream_url:
+                for f in info.get('formats', []):
+                    if f.get('url') and f.get('vcodec') != 'none':
+                        stream_url = f['url']
+                        break
+        
+        if not stream_url:
+            return False
 
-            watch_url = f"https://www.youtube.com/watch?v={video_id}&t={int(start_sec)}s"
-            page.goto(watch_url, timeout=40000)
-
-            try:
-                accept_btn = page.locator("button[aria-label='Accept all'], button:has-text('Accept all')").first
-                if accept_btn.is_visible(timeout=3000):
-                    accept_btn.click()
-            except Exception:
-                pass
-
-            try:
-                page.wait_for_selector("#movie_player", timeout=12000)
-            except Exception:
-                pass
-
-            page.wait_for_timeout(4500)
-
-            player_el = page.locator("#movie_player").first
-            if player_el.is_visible(timeout=3000):
-                player_el.screenshot(path=output_path)
-            else:
-                page.screenshot(path=output_path)
-
-            browser_context.close()
-            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        # Use bundled ffmpeg to extract the exact frame at start_sec
+        cmd = [
+            ffmpeg_exe, '-ss', str(start_sec), '-i', stream_url,
+            '-vframes', '1', '-q:v', '2', output_path, '-y'
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
 
     except Exception as e:
-        print(f"Stealth extraction error: {e}")
+        print(f"ytdlp extraction error: {e}")
         return False
 
 with tab_run:
@@ -168,8 +150,8 @@ with tab_run:
                         
                         screenshot_path = f"screenshot_{video_id}_{exact_sec}.png"
                         
-                        # Extract exact player frame using Stealth Playwright
-                        success_frame = extract_exact_frame_stealth(video_id, match['start_sec'], screenshot_path)
+                        # Extract exact frame via yt-dlp client emulation + bundled ffmpeg
+                        success_frame = extract_exact_frame_ytdlp(video_id, match['start_sec'], screenshot_path)
                         if not success_frame:
                             screenshot_path = None
 
