@@ -5,6 +5,15 @@ import subprocess
 import tempfile
 import streamlit as st
 
+@st.cache_resource
+def ensure_packages():
+    try:
+        subprocess.run(["pip", "install", "yt-dlp", "imageio-ffmpeg", "opencv-python-headless"], check=True)
+    except Exception as e:
+        st.warning(f"Package setup note: {e}")
+
+ensure_packages()
+
 from openai import OpenAI
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle
@@ -20,42 +29,64 @@ WORKFLOW_FILE = "youtube_workflow.json"
 
 tab_run, tab_studio = st.tabs(["🚀 Query Vector DB & Benchmark", "🛠️ LfD Workflow Studio (Schema Inspector)"])
 
+def clean_text(text):
+    """Removes emojis and non-ASCII characters that ReportLab Helvetica cannot render."""
+    if not text:
+        return ""
+    return re.sub(r'[^\x00-\x7F]+', ' ', text).strip()
+
 def extract_exact_frame(video_id, start_sec, output_path):
     """
-    Uses yt-dlp to get the direct stream URL and native system ffmpeg 
-    to slice the exact frame at start_sec.
+    Downloads a tiny local clip slice using yt-dlp client emulation and extracts 
+    the exact frame using OpenCV, bypassing remote stream 403 blocks.
     """
+    temp_clip = f"temp_{video_id}_{int(start_sec)}.mp4"
     try:
+        import cv2
         import yt_dlp
+
+        target_start = max(0.0, float(start_sec) - 0.5)
+        target_end = target_start + 3.0
 
         ydl_opts = {
             'format': 'best[height<=720]/best',
+            'download_ranges': yt_dlp.utils.download_range_func(None, [(target_start, target_end)]),
+            'outtmpl': temp_clip,
             'quiet': True,
+            'no_warnings': True,
             'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
         }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-            stream_url = info.get('url')
-            if not stream_url:
-                for f in info.get('formats', []):
-                    if f.get('url') and f.get('vcodec') != 'none':
-                        stream_url = f['url']
-                        break
-        
-        if not stream_url:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+
+        if not os.path.exists(temp_clip) or os.path.getsize(temp_clip) == 0:
             return False
 
-        # Use system ffmpeg to slice the exact frame at start_sec
-        cmd = [
-            'ffmpeg', '-ss', str(start_sec), '-i', stream_url,
-            '-vframes', '1', '-q:v', '2', output_path, '-y'
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        cap = cv2.VideoCapture(temp_clip)
+        if not cap.isOpened():
+            if os.path.exists(temp_clip):
+                os.remove(temp_clip)
+            return False
+
+        ret, frame = cap.read()
+        cap.release()
+
+        if os.path.exists(temp_clip):
+            os.remove(temp_clip)
+
+        if ret and frame is not None:
+            cv2.imwrite(output_path, frame)
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
 
     except Exception as e:
         print(f"Frame extraction error: {e}")
-        return False
+        if os.path.exists(temp_clip):
+            try:
+                os.remove(temp_clip)
+            except Exception:
+                pass
+    return False
 
 with tab_run:
     st.subheader("🔍 Search Channel Vector Index")
@@ -146,7 +177,7 @@ with tab_run:
                         except Exception as e:
                             analysis_text = f"Context Benchmark Analysis: {match['text']}"
 
-                        raw_title = match['title'].replace("- YouTube", "").strip()
+                        raw_title = clean_text(match['title'].replace("- YouTube", ""))
 
                         all_results.append({
                             'video_id': video_id,
@@ -154,9 +185,9 @@ with tab_run:
                             'timestamp': match['timestamp'],
                             'start_sec': exact_sec,
                             'seek_url': seek_url,
-                            'ocr_text': match['text'],
+                            'ocr_text': clean_text(match['text']),
                             'screenshot': screenshot_path if screenshot_path and os.path.exists(screenshot_path) else None,
-                            'analysis': analysis_text
+                            'analysis': clean_text(analysis_text)
                         })
 
                 st.session_state["search_results"] = all_results
@@ -185,7 +216,6 @@ with tab_run:
                 }
                 st.table(table_data)
 
-                # Display exact timestamp sliced frame image in UI
                 if res['screenshot'] and os.path.exists(res['screenshot']):
                     st.image(res['screenshot'], caption=f"Exact Timestamp Frame @ {res['timestamp']}", width=640)
                 else:
@@ -194,7 +224,7 @@ with tab_run:
                 
                 st.markdown("---")
 
-        # PDF Export Section with Exact Sliced Frames
+        # PDF Export Section with Cleaned Text and Sliced Frames
         st.subheader("📄 Export Benchmark Report")
         
         pdf_filename = f"Benchmark_Report_{q_name.replace(' ', '_')}.pdf"
@@ -240,7 +270,6 @@ with tab_run:
             story.append(t)
             story.append(Spacer(1, 10))
 
-            # Embed the exact sliced timestamp frame into the PDF report
             if res['screenshot'] and os.path.exists(res['screenshot']):
                 story.append(RLImage(res['screenshot'], width=440, height=247))
                 story.append(Spacer(1, 20))
