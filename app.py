@@ -22,8 +22,8 @@ from reportlab.lib import colors
 
 st.set_page_config(page_title="AI Automotive Benchmarking", layout="wide")
 
-st.title("🚗 AI Automotive Channel-Wide Benchmarking")
-st.markdown("Query the channel-wide pre-indexed RAG vector store with exact-timestamp frame slicing for UI display and PDF export.")
+st.title(" Automotive Review YouTube Channel Scraper & Benchmarking")
+st.markdown("Query the channel-wide pre-indexed RAG vector store with exact-timestamp frame slicing for UI display and PDF export BETA- by Ibraheem.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
@@ -225,7 +225,7 @@ with tab_run:
                 st.markdown("---")
 
         # PDF Export Section with Cleaned Text and Sliced Frames
-        st.subheader("📄 Export Benchmark Report")
+        st.subheader("📄 Export Benchmark Report - BETA")
         
         pdf_filename = f"Benchmark_Report_{q_name.replace(' ', '_')}.pdf"
         doc = SimpleDocTemplate(
@@ -242,7 +242,7 @@ with tab_run:
         cell_bold = ParagraphStyle('TableCellBold', parent=styles['Normal'], fontSize=9, leading=12, fontName='Helvetica-Bold')
 
         story = [
-            Paragraph(f"🚗 Automotive Benchmarking Report: {q_name}", styles['Heading1']),
+            Paragraph(f"YouTube Channel Automotive Benchmarking Report: {q_name}", styles['Heading1']),
             Spacer(1, 12)
         ]
 
