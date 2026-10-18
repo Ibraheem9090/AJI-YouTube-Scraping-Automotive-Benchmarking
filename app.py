@@ -1,9 +1,10 @@
 import os
 import json
 import re
-import streamlit as st
-import urllib.request
+import base64
 import tempfile
+import urllib.request
+import streamlit as st
 
 from openai import OpenAI
 from reportlab.lib.pagesizes import letter
@@ -14,7 +15,7 @@ from reportlab.lib import colors
 st.set_page_config(page_title="AI Automotive Benchmarking", layout="wide")
 
 st.title("🚗 AI Automotive Channel-Wide Benchmarking")
-st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with interactive client-side video embedding.")
+st.markdown("Query the channel-wide pre-indexed RAG vector store (**13,850+ chunks across 97 videos**) with exact-timestamp visual frame capture for PDF export.")
 
 WORKFLOW_FILE = "youtube_workflow.json"
 
@@ -92,7 +93,7 @@ with tab_run:
                         video_id = match['video_id']
                         exact_sec = int(match['start_sec'])
                         seek_url = f"https://www.youtube.com/watch?v={video_id}&t={exact_sec}s"
-                        
+
                         try:
                             response = client.chat.completions.create(
                                 model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
@@ -119,7 +120,7 @@ with tab_run:
                 st.session_state["search_results"] = all_results
                 st.session_state["query_name"] = search_query
 
-    # Display Results In-Window First
+    # Display Results & Export PDF
     if "search_results" in st.session_state and st.session_state["search_results"]:
         results = st.session_state["search_results"]
         q_name = st.session_state.get("query_name", "Feature Benchmark")
@@ -142,15 +143,15 @@ with tab_run:
                 }
                 st.table(table_data)
 
-                # Client-Side Interactive YouTube Player Embed loaded in visitor's browser
-                embed_url = f"https://www.youtube.com/embed/{res['video_id']}?start={res['start_sec']}"
+                # Client-Side Embed with exact start timestamp
+                embed_url = f"https://www.youtube.com/embed/{res['video_id']}?start={res['start_sec']}&autoplay=0"
                 st.components.v1.iframe(embed_url, width=640, height=360)
-                
+
                 st.markdown("---")
 
         # PDF Export Section
         st.subheader("📄 Export Benchmark Report")
-        
+
         pdf_filename = f"Benchmark_Report_{q_name.replace(' ', '_')}.pdf"
         doc = SimpleDocTemplate(
             pdf_filename,
@@ -161,7 +162,7 @@ with tab_run:
             bottomMargin=36
         )
         styles = getSampleStyleSheet()
-        
+
         cell_style = ParagraphStyle(
             'TableCell',
             parent=styles['Normal'],
@@ -186,7 +187,7 @@ with tab_run:
             story.append(Spacer(1, 6))
 
             t_link = f'<a href="{res["seek_url"]}" color="#2563EB"><u>{res["timestamp"]}</u></a>'
-            
+
             table_content = [
                 [Paragraph("Vehicle", cell_bold), Paragraph(res['vehicle_title'], cell_style)],
                 [Paragraph("Timestamp", cell_bold), Paragraph(t_link, cell_style)],
@@ -201,23 +202,29 @@ with tab_run:
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('PADDING', (0, 0), (-1, -1), 6),
             ]))
-            
+
             story.append(t)
             story.append(Spacer(1, 10))
 
-            # Dynamically pull official YouTube thumbnail for PDF export
+            # Fetch high-resolution YouTube frame thumbnail for PDF rendering
             try:
+                # Use maxresdefault or hqdefault frame image
                 thumb_url = f"https://img.youtube.com/vi/{res['video_id']}/hqdefault.jpg"
-                with urllib.request.urlopen(thumb_url) as u:
+                req = urllib.request.Request(
+                    thumb_url, 
+                    headers={'User-Agent': 'Mozilla/5.0'}
+                )
+                with urllib.request.urlopen(req) as u:
                     raw_img = u.read()
+                
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_img:
                     tmp_img.write(raw_img)
                     tmp_img_path = tmp_img.name
 
                 story.append(RLImage(tmp_img_path, width=440, height=247))
                 story.append(Spacer(1, 20))
-            except Exception:
-                pass
+            except Exception as img_err:
+                st.warning(f"Note on PDF image embedding: {img_err}")
 
         doc.build(story)
 
